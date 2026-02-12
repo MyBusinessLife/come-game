@@ -6,7 +6,7 @@
  * Default endpoints expected (relative to `data-api-base`):
  * - POST   /auth/login                         body: { username, password } -> { token, user? }
  * - GET    /auth/me                            -> { user }
- * - GET    /dashboard/summary?from&to           -> { kpis, series, topProducts, topOffers }
+ * - GET    /dashboard/summary?from&to           -> { kpis, series, byHour, byWeekday, topProducts, topOffers }
  * - GET    /sales?from&to&q&limit&offset        -> { items, total }
  * - GET    /sales/:id                          -> { sale, details }
  * - GET    /products?q&limit&offset             -> { items, total }
@@ -76,6 +76,15 @@
     }
   }
 
+  function escapeHtml(s) {
+    return String(s == null ? "" : s)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/\"/g, "&quot;")
+      .replace(/'/g, "&#39;");
+  }
+
   function isTruthy(v) {
     return v === true || v === "true" || v === "1" || v === 1;
   }
@@ -88,6 +97,21 @@
     return y + "-" + m + "-" + day;
   }
 
+  function isoParts(iso) {
+    var p = String(iso || "").split("-");
+    if (p.length !== 3) return null;
+    var y = Number(p[0]);
+    var m = Number(p[1]);
+    var d = Number(p[2]);
+    if (!Number.isFinite(y) || !Number.isFinite(m) || !Number.isFinite(d)) return null;
+    if (m < 1 || m > 12 || d < 1 || d > 31) return null;
+    return { y: y, m: m, d: d };
+  }
+
+  function isoFormat(y, m, d) {
+    return String(y) + "-" + String(m).padStart(2, "0") + "-" + String(d).padStart(2, "0");
+  }
+
   function isoAddDays(iso, deltaDays) {
     var parts = String(iso || "").split("-");
     if (parts.length !== 3) return iso;
@@ -97,6 +121,48 @@
     var m = String(d.getMonth() + 1).padStart(2, "0");
     var day = String(d.getDate()).padStart(2, "0");
     return y + "-" + m + "-" + day;
+  }
+
+  function firstDayOfMonthISO(iso) {
+    var p = isoParts(iso);
+    if (!p) return iso;
+    return isoFormat(p.y, p.m, 1);
+  }
+
+  function firstDayOfPrevMonthISO(iso) {
+    var p = isoParts(iso);
+    if (!p) return iso;
+    var y = p.y;
+    var m = p.m - 1;
+    if (m <= 0) {
+      m = 12;
+      y -= 1;
+    }
+    return isoFormat(y, m, 1);
+  }
+
+  function lastDayOfPrevMonthISO(iso) {
+    var p = isoParts(iso);
+    if (!p) return iso;
+    var y = p.y;
+    var m = p.m - 1;
+    if (m <= 0) {
+      m = 12;
+      y -= 1;
+    }
+    // Date's month is 0-based. Passing day=0 gives the last day of previous month.
+    var last = new Date(y, m, 0).getDate();
+    return isoFormat(y, m, last);
+  }
+
+  function daysBetweenInclusive(fromIso, toIso) {
+    var f = isoParts(fromIso);
+    var t = isoParts(toIso);
+    if (!f || !t) return null;
+    var fMs = Date.UTC(f.y, f.m - 1, f.d);
+    var tMs = Date.UTC(t.y, t.m - 1, t.d);
+    var diff = Math.floor((tMs - fMs) / 86400000) + 1;
+    return diff >= 1 && Number.isFinite(diff) ? diff : null;
   }
 
   function toNumber(v) {
@@ -529,6 +595,21 @@
     var fromInput = el("input", { class: "cag-input", type: "date", value: state.range.from });
     var toInput = el("input", { class: "cag-input", type: "date", value: state.range.to });
 
+    function presetBtn(label, id) {
+      return el("button", { class: "cag-preset", type: "button", text: label, "data-range": id });
+    }
+
+    var presets = el(
+      "div",
+      { class: "cag-presets" },
+      presetBtn("Aujourd'hui", "today"),
+      presetBtn("Hier", "yesterday"),
+      presetBtn("7j", "7d"),
+      presetBtn("30j", "30d"),
+      presetBtn("Mois", "mtd"),
+      presetBtn("M-1", "lm")
+    );
+
     var refreshBtn = el("button", { class: "cag-btn", type: "button", text: "Rafraichir" });
     var logoutBtn = el("button", { class: "cag-btn cag-btn-ghost", type: "button", text: "Déconnexion" });
 
@@ -550,13 +631,21 @@
         el("label", { text: "Au" }),
         toInput
       ),
+      presets,
       refreshBtn,
       userPill,
       logoutBtn
     );
 
     var topbar = el("div", { class: "cag-topbar" }, left, actions);
-    return { topbar: topbar, fromInput: fromInput, toInput: toInput, refreshBtn: refreshBtn, logoutBtn: logoutBtn };
+    return {
+      topbar: topbar,
+      fromInput: fromInput,
+      toInput: toInput,
+      presets: presets,
+      refreshBtn: refreshBtn,
+      logoutBtn: logoutBtn,
+    };
   }
 
   function renderTabs(state) {
@@ -699,6 +788,134 @@
       (padY + 10) +
       '">' +
       labelMax +
+      "</text>" +
+      "</g>" +
+      "</svg>";
+
+    var wrapper = el("div", { html: svg });
+    return wrapper.firstChild;
+  }
+
+  function svgBarChart(items, valueKey, labelKey, fmtValue, opts) {
+    opts = opts || {};
+    var w = 1000;
+    var h = 280;
+    var padX = 24;
+    var padY = 26;
+    var gap = typeof opts.gap === "number" ? opts.gap : 6;
+
+    var n = items.length;
+    var values = items
+      .map(function (p) {
+        var v = p && p[valueKey];
+        return v == null ? null : Number(v);
+      })
+      .filter(function (v) {
+        return v != null && Number.isFinite(v);
+      });
+    var maxV = values.length ? Math.max.apply(Math, values) : 0;
+    if (maxV <= 0) maxV = 1;
+
+    var usableW = w - padX * 2;
+    var usableH = h - padY * 2;
+
+    var barW = n > 0 ? (usableW - gap * (n - 1)) / n : usableW;
+    barW = Math.max(2, barW);
+
+    function xAt(i) {
+      return padX + i * (barW + gap);
+    }
+
+    function yAt(v) {
+      var t = v / maxV;
+      return padY + (1 - t) * usableH;
+    }
+
+    // find max item
+    var best = null;
+    for (var i = 0; i < n; i++) {
+      var vv = items[i] && items[i][valueKey];
+      vv = vv == null ? null : Number(vv);
+      if (!Number.isFinite(vv)) continue;
+      if (!best || vv > best.v) best = { i: i, v: vv };
+    }
+
+    var bars = "";
+    var labels = "";
+    var labelEvery = typeof opts.labelEvery === "number" ? Math.max(1, opts.labelEvery) : 3;
+
+    for (var j = 0; j < n; j++) {
+      var item = items[j] || {};
+      var v = item[valueKey];
+      v = v == null ? 0 : Number(v);
+      if (!Number.isFinite(v)) v = 0;
+      var x = xAt(j);
+      var y = yAt(v);
+      var bh = padY + usableH - y;
+      var isBest = best && best.i === j;
+      var fill = isBest ? "rgba(249,115,22,0.82)" : "rgba(14,165,164,0.72)";
+      var stroke = isBest ? "rgba(249,115,22,0.95)" : "rgba(14,165,164,0.92)";
+      var title = String(item[labelKey] || "") + ": " + (fmtValue ? fmtValue(v) : String(v));
+      bars +=
+        '<rect x="' +
+        x.toFixed(2) +
+        '" y="' +
+        y.toFixed(2) +
+        '" width="' +
+        barW.toFixed(2) +
+        '" height="' +
+        bh.toFixed(2) +
+        '" rx="8" ry="8" fill="' +
+        fill +
+        '" stroke="' +
+        stroke +
+        '" stroke-width="1">' +
+        "<title>" +
+        escapeHtml(title) +
+        "</title>" +
+        "</rect>";
+
+      if (j % labelEvery === 0 || j === n - 1) {
+        var lx = x + barW / 2;
+        labels +=
+          '<text x="' +
+          lx.toFixed(2) +
+          '" y="' +
+          (h - 10) +
+          '" text-anchor="middle">' +
+          escapeHtml(String(item[labelKey] || "")) +
+          "</text>";
+      }
+    }
+
+    var labelMax = fmtValue ? fmtValue(maxV) : String(maxV);
+    var labelBest = best ? (items[best.i] && items[best.i][labelKey] ? String(items[best.i][labelKey]) : "") : "";
+
+    var svg =
+      '<svg class="cag-chart" viewBox="0 0 ' +
+      w +
+      " " +
+      h +
+      '" preserveAspectRatio="none" role="img" aria-label="Graphique">' +
+      '<rect x="0" y="0" width="' +
+      w +
+      '" height="' +
+      h +
+      '" fill="rgba(255,255,255,0.0)"/>' +
+      '<g opacity="0.9">' +
+      bars +
+      "</g>" +
+      '<g font-family="inherit" font-size="12" font-weight="700" fill="rgba(91,100,117,0.9)">' +
+      labels +
+      "</g>" +
+      '<g font-family="inherit" font-size="12" font-weight="800" fill="rgba(17,24,39,0.72)">' +
+      '<text x="' +
+      (padX + 6) +
+      '" y="' +
+      (padY + 12) +
+      '">' +
+      escapeHtml(labelMax) +
+      (labelBest ? " • pic " + escapeHtml(labelBest) : "") +
       "</text>" +
       "</g>" +
       "</svg>";
@@ -889,6 +1106,10 @@
   function renderDashboard(shell, root, cfg, state) {
     var fmtMoney = moneyFormatter(cfg);
     var fmtCompact = compactNumberFormatter(cfg);
+    var fmtInt = function (n) {
+      if (n == null || !Number.isFinite(Number(n))) return "—";
+      return String(Math.round(Number(n)));
+    };
 
     var chrome = renderTopbar(cfg, state, fmtMoney, fmtCompact);
     var tabs = renderTabs(state);
@@ -914,6 +1135,41 @@
     }
 
     chrome.logoutBtn.addEventListener("click", onLogout);
+
+    function applyRange(from, to) {
+      if (from && to && from > to) {
+        toast(root, "Date 'Du' doit être <= 'Au'", "warn");
+        return;
+      }
+      if (from) state.range.from = from;
+      if (to) state.range.to = to;
+      chrome.fromInput.value = state.range.from;
+      chrome.toInput.value = state.range.to;
+      refreshAll();
+    }
+
+    function applyPreset(presetId) {
+      var today = todayISO();
+      if (presetId === "today") return applyRange(today, today);
+      if (presetId === "yesterday") {
+        var y = isoAddDays(today, -1);
+        return applyRange(y, y);
+      }
+      if (presetId === "7d") return applyRange(isoAddDays(today, -6), today);
+      if (presetId === "30d") return applyRange(isoAddDays(today, -29), today);
+      if (presetId === "mtd") return applyRange(firstDayOfMonthISO(today), today);
+      if (presetId === "lm") return applyRange(firstDayOfPrevMonthISO(today), lastDayOfPrevMonthISO(today));
+    }
+
+    if (chrome.presets) {
+      chrome.presets.addEventListener("click", function (e) {
+        var btn = e.target && e.target.closest ? e.target.closest("[data-range]") : null;
+        if (!btn) return;
+        var id = btn.getAttribute("data-range");
+        if (!id) return;
+        applyPreset(id);
+      });
+    }
 
     function updateRangeFromInputs() {
       var f = chrome.fromInput.value;
@@ -970,6 +1226,8 @@
         var series = (r && (r.series || (r.data && r.data.series))) || [];
         var topProducts = (r && (r.topProducts || (r.data && r.data.topProducts))) || [];
         var topOffers = (r && (r.topOffers || (r.data && r.data.topOffers))) || [];
+        var byHour = (r && (r.byHour || (r.data && r.data.byHour))) || [];
+        var byWeekday = (r && (r.byWeekday || (r.data && r.data.byWeekday))) || [];
 
         state.kpis = {
           revenue: toNumber(k.revenue != null ? k.revenue : k.totalRevenue),
@@ -980,6 +1238,8 @@
         state.series = Array.isArray(series) ? series : [];
         state.topProducts = Array.isArray(topProducts) ? topProducts : [];
         state.topOffers = Array.isArray(topOffers) ? topOffers : [];
+        state.byHour = Array.isArray(byHour) ? byHour : [];
+        state.byWeekday = Array.isArray(byWeekday) ? byWeekday : [];
 
         // Re-render whole overview to keep it simple and consistent.
         view.innerHTML = "";
@@ -989,6 +1249,9 @@
         var salesCount = state.kpis.salesCount;
         var avgTicket = state.kpis.avgTicket != null ? state.kpis.avgTicket : salesCount ? revenue / salesCount : null;
         var margin = revenue && profit != null ? (profit / revenue) * 100 : null;
+        var daysCount = daysBetweenInclusive(state.range.from, state.range.to);
+        var avgRevenuePerDay = daysCount && revenue != null ? revenue / daysCount : null;
+        var avgRevenuePerHour = daysCount && revenue != null ? revenue / (daysCount * 24) : null;
 
         var cards = el(
           "div",
@@ -998,7 +1261,17 @@
             { class: "cag-card" },
             el("h3", { text: "Revenu" }),
             el("p", { class: "cag-kpi", text: fmtMoney(revenue) }),
-            el("div", { class: "cag-kpi-sub", text: state.range.from + " -> " + state.range.to })
+            el("div", {
+              class: "cag-kpi-sub",
+              text:
+                state.range.from +
+                " -> " +
+                state.range.to +
+                " • Moy/jour: " +
+                fmtMoney(avgRevenuePerDay) +
+                " • Moy/heure: " +
+                fmtMoney(avgRevenuePerHour),
+            })
           ),
           el(
             "div",
@@ -1026,7 +1299,12 @@
         var chartPanel = el("div", { class: "cag-panel" }, el("h2", { text: "Revenu (jour par jour)" }));
         var chartSeries = state.series.map(function (p) {
           var d = p && (p.date || p.day || p.label);
-          return { date: d, revenue: toNumber(p.revenue != null ? p.revenue : p.total) };
+          return {
+            date: d,
+            revenue: toNumber(p.revenue != null ? p.revenue : p.total),
+            salesCount: toNumber(p.salesCount != null ? p.salesCount : p.count),
+            avgTicket: toNumber(p.avgTicket != null ? p.avgTicket : p.averageTicket),
+          };
         });
         chartPanel.appendChild(svgLineChart(chartSeries, "revenue", fmtMoney));
 
@@ -1060,6 +1338,83 @@
         var split = el("div", { class: "cag-split" }, chartPanel, topPanel);
         view.appendChild(cards);
         view.appendChild(split);
+
+        // ---- Extra charts ----
+        function normalizeHourSeries(rows) {
+          var out = [];
+          for (var i = 0; i < 24; i++) out.push({ hour: i, label: String(i).padStart(2, "0") + "h", revenue: 0, salesCount: 0 });
+          (rows || []).forEach(function (x) {
+            var h = toNumber(x.hour != null ? x.hour : x.h);
+            if (h == null) return;
+            h = Math.max(0, Math.min(23, Math.floor(h)));
+            out[h].revenue = toNumber(x.revenue != null ? x.revenue : x.total) || 0;
+            out[h].salesCount = toNumber(x.salesCount != null ? x.salesCount : x.count) || 0;
+          });
+          return out;
+        }
+
+        function normalizeWeekdaySeries(rows) {
+          var labels = ["Lun", "Mar", "Mer", "Jeu", "Ven", "Sam", "Dim"];
+          var out = [];
+          for (var i = 0; i < 7; i++) out.push({ weekday: i, label: labels[i], revenue: 0, salesCount: 0 });
+          (rows || []).forEach(function (x) {
+            var wd = toNumber(x.weekday != null ? x.weekday : x.wd);
+            if (wd == null) return;
+            wd = Math.max(0, Math.min(6, Math.floor(wd)));
+            out[wd].revenue = toNumber(x.revenue != null ? x.revenue : x.total) || 0;
+            out[wd].salesCount = toNumber(x.salesCount != null ? x.salesCount : x.count) || 0;
+          });
+          return out;
+        }
+
+        var hourData = normalizeHourSeries(state.byHour);
+        var hourAvgData = hourData.map(function (x) {
+          var div = daysCount && Number.isFinite(Number(daysCount)) ? Number(daysCount) : 0;
+          return {
+            hour: x.hour,
+            label: x.label,
+            revenue: div ? x.revenue / div : x.revenue,
+            salesCount: x.salesCount,
+          };
+        });
+        var weekdayData = normalizeWeekdaySeries(state.byWeekday);
+
+        var pHourRevenue = el("div", { class: "cag-panel" }, el("h2", { text: "Revenu par heure (moyenne/jour)" }));
+        if (!state.byHour || !state.byHour.length) {
+          pHourRevenue.appendChild(el("div", { class: "cag-empty", text: "Données indisponibles (mets à jour l'API pour renvoyer byHour)." }));
+        } else {
+          pHourRevenue.appendChild(svgBarChart(hourAvgData, "revenue", "label", fmtMoney, { labelEvery: 3 }));
+        }
+
+        var pHourSales = el("div", { class: "cag-panel" }, el("h2", { text: "Ventes par heure" }));
+        if (!state.byHour || !state.byHour.length) {
+          pHourSales.appendChild(el("div", { class: "cag-empty", text: "Données indisponibles (mets à jour l'API pour renvoyer byHour)." }));
+        } else {
+          pHourSales.appendChild(svgBarChart(hourData, "salesCount", "label", fmtInt, { labelEvery: 3 }));
+        }
+
+        var grid2a = el("div", { class: "cag-grid-2" }, pHourRevenue, pHourSales);
+        view.appendChild(grid2a);
+
+        var pWeekday = el("div", { class: "cag-panel" }, el("h2", { text: "Revenu par jour de semaine" }));
+        if (!state.byWeekday || !state.byWeekday.length) {
+          pWeekday.appendChild(el("div", { class: "cag-empty", text: "Données indisponibles (mets à jour l'API pour renvoyer byWeekday)." }));
+        } else {
+          pWeekday.appendChild(svgBarChart(weekdayData, "revenue", "label", fmtMoney, { labelEvery: 1, gap: 10 }));
+        }
+
+        var pAvgTicket = el("div", { class: "cag-panel" }, el("h2", { text: "Ticket moyen (jour par jour)" }));
+        var hasAvgTicket = chartSeries.some(function (p) {
+          return Number.isFinite(Number(p.avgTicket));
+        });
+        if (!hasAvgTicket) {
+          pAvgTicket.appendChild(el("div", { class: "cag-empty", text: "Données indisponibles (mets à jour l'API pour renvoyer avgTicket par jour)." }));
+        } else {
+          pAvgTicket.appendChild(svgLineChart(chartSeries, "avgTicket", fmtMoney));
+        }
+
+        var grid2b = el("div", { class: "cag-grid-2" }, pWeekday, pAvgTicket);
+        view.appendChild(grid2b);
 
         // Update subtitle in topbar with actual sales count
         var sub = $(".cag-brand-sub", shell);
@@ -1764,6 +2119,8 @@
       series: [],
       topProducts: [],
       topOffers: [],
+      byHour: [],
+      byWeekday: [],
       sales: null,
       products: null,
       offers: null,
@@ -1783,4 +2140,3 @@
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", boot);
   else boot();
 })();
-
