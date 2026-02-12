@@ -1,0 +1,639 @@
+/* CAG POS Dashboard (Webflow embed) - v1
+   Scope: everything is scoped under [data-cag="pos-dashboard"] so it won't leak to the rest of your Webflow site.
+*/
+
+[data-cag="pos-dashboard"] {
+  --cag-bg: #f8f4ec;
+  --cag-surface: rgba(255, 255, 255, 0.78);
+  --cag-surface-solid: #ffffff;
+  --cag-ink: #111827;
+  --cag-muted: #5b6475;
+  --cag-border: rgba(17, 24, 39, 0.12);
+  --cag-shadow: 0 18px 48px rgba(17, 24, 39, 0.14);
+  --cag-brand: #0ea5a4;
+  --cag-brand-ink: #053f3f;
+  --cag-accent: #f97316;
+  --cag-danger: #dc2626;
+  --cag-ok: #16a34a;
+  --cag-warn: #d97706;
+
+  font-family:
+    "Space Grotesk",
+    ui-sans-serif,
+    system-ui,
+    -apple-system,
+    "Segoe UI",
+    Roboto,
+    "Helvetica Neue",
+    Arial,
+    "Noto Sans",
+    "Liberation Sans",
+    sans-serif;
+  color: var(--cag-ink);
+}
+
+[data-cag="pos-dashboard"] .cag-app {
+  position: relative;
+  min-height: 680px;
+  overflow: hidden;
+  border: 1px solid var(--cag-border);
+  border-radius: 18px;
+  box-shadow: var(--cag-shadow);
+  background:
+    radial-gradient(1200px 520px at 10% -5%, rgba(14, 165, 164, 0.22), transparent 60%),
+    radial-gradient(1100px 620px at 92% 18%, rgba(249, 115, 22, 0.16), transparent 55%),
+    linear-gradient(180deg, #ffffff 0%, var(--cag-bg) 55%, #ffffff 120%);
+}
+
+[data-cag="pos-dashboard"] .cag-grid {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0.25;
+  background-image:
+    linear-gradient(to right, rgba(17, 24, 39, 0.06) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(17, 24, 39, 0.06) 1px, transparent 1px);
+  background-size: 40px 40px;
+  mask-image: radial-gradient(900px 360px at 50% 0%, #000 40%, transparent 70%);
+}
+
+[data-cag="pos-dashboard"] .cag-shell {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 18px;
+}
+
+[data-cag="pos-dashboard"] .cag-topbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 14px;
+  border: 1px solid var(--cag-border);
+  border-radius: 16px;
+  background: var(--cag-surface);
+  backdrop-filter: blur(10px);
+}
+
+[data-cag="pos-dashboard"] .cag-brand {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+[data-cag="pos-dashboard"] .cag-brand-title {
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  font-size: 16px;
+  line-height: 1.1;
+}
+
+[data-cag="pos-dashboard"] .cag-brand-sub {
+  font-size: 12px;
+  color: var(--cag-muted);
+}
+
+[data-cag="pos-dashboard"] .cag-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  justify-content: flex-end;
+}
+
+[data-cag="pos-dashboard"] .cag-range {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+[data-cag="pos-dashboard"] .cag-range label {
+  font-size: 12px;
+  color: var(--cag-muted);
+}
+
+[data-cag="pos-dashboard"] .cag-input,
+[data-cag="pos-dashboard"] .cag-select {
+  appearance: none;
+  background: rgba(255, 255, 255, 0.82);
+  border: 1px solid var(--cag-border);
+  border-radius: 12px;
+  padding: 10px 12px;
+  font-size: 14px;
+  line-height: 1.2;
+  color: var(--cag-ink);
+  outline: none;
+  transition: box-shadow 160ms ease, border-color 160ms ease, transform 160ms ease;
+}
+
+[data-cag="pos-dashboard"] .cag-input:focus,
+[data-cag="pos-dashboard"] .cag-select:focus {
+  border-color: rgba(14, 165, 164, 0.55);
+  box-shadow: 0 0 0 4px rgba(14, 165, 164, 0.16);
+}
+
+[data-cag="pos-dashboard"] .cag-input::placeholder {
+  color: rgba(91, 100, 117, 0.75);
+}
+
+[data-cag="pos-dashboard"] .cag-btn {
+  border: 1px solid var(--cag-border);
+  background: rgba(255, 255, 255, 0.86);
+  color: var(--cag-ink);
+  padding: 10px 12px;
+  border-radius: 12px;
+  font-weight: 600;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  transition: transform 120ms ease, box-shadow 140ms ease, background 140ms ease, border-color 140ms ease;
+}
+
+[data-cag="pos-dashboard"] .cag-btn:hover {
+  transform: translateY(-1px);
+  border-color: rgba(17, 24, 39, 0.18);
+  box-shadow: 0 10px 24px rgba(17, 24, 39, 0.12);
+}
+
+[data-cag="pos-dashboard"] .cag-btn:active {
+  transform: translateY(0px);
+}
+
+[data-cag="pos-dashboard"] .cag-btn-primary {
+  border-color: rgba(14, 165, 164, 0.55);
+  background: linear-gradient(180deg, rgba(14, 165, 164, 0.98), rgba(14, 165, 164, 0.86));
+  color: #ffffff;
+  box-shadow: 0 12px 26px rgba(14, 165, 164, 0.22);
+}
+
+[data-cag="pos-dashboard"] .cag-btn-primary:hover {
+  box-shadow: 0 16px 36px rgba(14, 165, 164, 0.26);
+}
+
+[data-cag="pos-dashboard"] .cag-btn-danger {
+  border-color: rgba(220, 38, 38, 0.45);
+  background: linear-gradient(180deg, rgba(220, 38, 38, 0.98), rgba(220, 38, 38, 0.85));
+  color: #ffffff;
+}
+
+[data-cag="pos-dashboard"] .cag-btn-ghost {
+  background: transparent;
+}
+
+[data-cag="pos-dashboard"] .cag-tabs {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  align-items: center;
+  padding: 10px 10px;
+  border: 1px solid var(--cag-border);
+  border-radius: 16px;
+  background: var(--cag-surface);
+  backdrop-filter: blur(10px);
+}
+
+[data-cag="pos-dashboard"] .cag-tab {
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--cag-muted);
+  padding: 10px 12px;
+  border-radius: 12px;
+  font-weight: 700;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+[data-cag="pos-dashboard"] .cag-tab[aria-selected="true"] {
+  background: rgba(255, 255, 255, 0.86);
+  color: var(--cag-ink);
+  border-color: var(--cag-border);
+  box-shadow: 0 10px 24px rgba(17, 24, 39, 0.10);
+}
+
+[data-cag="pos-dashboard"] .cag-main {
+  padding: 12px;
+  border: 1px solid var(--cag-border);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.62);
+  backdrop-filter: blur(10px);
+}
+
+[data-cag="pos-dashboard"] .cag-view {
+  display: none;
+  animation: cag-fade-up 240ms ease both;
+}
+
+[data-cag="pos-dashboard"] .cag-view.is-active {
+  display: block;
+}
+
+@keyframes cag-fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+[data-cag="pos-dashboard"] .cag-cards {
+  display: grid;
+  grid-template-columns: repeat(12, 1fr);
+  gap: 12px;
+}
+
+[data-cag="pos-dashboard"] .cag-card {
+  grid-column: span 3;
+  padding: 14px;
+  border-radius: 16px;
+  border: 1px solid var(--cag-border);
+  background: rgba(255, 255, 255, 0.8);
+}
+
+[data-cag="pos-dashboard"] .cag-card h3 {
+  margin: 0 0 8px 0;
+  font-size: 12px;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--cag-muted);
+}
+
+[data-cag="pos-dashboard"] .cag-kpi {
+  font-size: 24px;
+  font-weight: 800;
+  letter-spacing: -0.03em;
+  margin: 0;
+}
+
+[data-cag="pos-dashboard"] .cag-kpi-sub {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--cag-muted);
+}
+
+[data-cag="pos-dashboard"] .cag-split {
+  display: grid;
+  grid-template-columns: 1.25fr 0.75fr;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+[data-cag="pos-dashboard"] .cag-panel {
+  padding: 14px;
+  border-radius: 16px;
+  border: 1px solid var(--cag-border);
+  background: rgba(255, 255, 255, 0.8);
+  overflow: hidden;
+}
+
+[data-cag="pos-dashboard"] .cag-panel h2 {
+  margin: 0 0 10px 0;
+  font-size: 14px;
+  letter-spacing: -0.01em;
+}
+
+[data-cag="pos-dashboard"] .cag-chart {
+  width: 100%;
+  height: 220px;
+  display: block;
+}
+
+[data-cag="pos-dashboard"] .cag-mini-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+[data-cag="pos-dashboard"] .cag-mini-item {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 10px;
+  border-radius: 14px;
+  border: 1px solid rgba(17, 24, 39, 0.10);
+  background: rgba(255, 255, 255, 0.7);
+}
+
+[data-cag="pos-dashboard"] .cag-mini-item strong {
+  font-size: 13px;
+}
+
+[data-cag="pos-dashboard"] .cag-mini-item span {
+  font-size: 13px;
+  color: var(--cag-muted);
+}
+
+[data-cag="pos-dashboard"] .cag-toolbar {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  align-items: center;
+  margin-bottom: 10px;
+}
+
+[data-cag="pos-dashboard"] .cag-toolbar-left,
+[data-cag="pos-dashboard"] .cag-toolbar-right {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+[data-cag="pos-dashboard"] .cag-table {
+  width: 100%;
+  border-collapse: collapse;
+  border-spacing: 0;
+  font-size: 13px;
+}
+
+[data-cag="pos-dashboard"] .cag-table th,
+[data-cag="pos-dashboard"] .cag-table td {
+  text-align: left;
+  padding: 10px 10px;
+  border-bottom: 1px solid rgba(17, 24, 39, 0.08);
+  vertical-align: top;
+}
+
+[data-cag="pos-dashboard"] .cag-table th {
+  font-size: 12px;
+  color: var(--cag-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+[data-cag="pos-dashboard"] .cag-table tr:hover td {
+  background: rgba(14, 165, 164, 0.06);
+}
+
+[data-cag="pos-dashboard"] .cag-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  border-radius: 999px;
+  padding: 6px 10px;
+  border: 1px solid rgba(17, 24, 39, 0.10);
+  background: rgba(255, 255, 255, 0.7);
+  font-size: 12px;
+  color: var(--cag-muted);
+}
+
+[data-cag="pos-dashboard"] .cag-status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--cag-brand);
+}
+
+[data-cag="pos-dashboard"] .cag-empty {
+  padding: 16px;
+  color: var(--cag-muted);
+  font-size: 13px;
+}
+
+[data-cag="pos-dashboard"] .cag-footer-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  align-items: center;
+  margin-top: 12px;
+}
+
+[data-cag="pos-dashboard"] .cag-pagination {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+[data-cag="pos-dashboard"] .cag-small {
+  font-size: 12px;
+  color: var(--cag-muted);
+}
+
+[data-cag="pos-dashboard"] .cag-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 99999;
+  background: rgba(17, 24, 39, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 18px;
+}
+
+[data-cag="pos-dashboard"] .cag-modal {
+  width: min(720px, 100%);
+  border-radius: 18px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgba(255, 255, 255, 0.92);
+  box-shadow: 0 20px 70px rgba(0, 0, 0, 0.3);
+  overflow: hidden;
+}
+
+[data-cag="pos-dashboard"] .cag-modal-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 14px;
+  border-bottom: 1px solid rgba(17, 24, 39, 0.10);
+}
+
+[data-cag="pos-dashboard"] .cag-modal-title {
+  font-weight: 800;
+  letter-spacing: -0.02em;
+}
+
+[data-cag="pos-dashboard"] .cag-modal-body {
+  padding: 14px;
+}
+
+[data-cag="pos-dashboard"] .cag-form {
+  display: grid;
+  grid-template-columns: repeat(12, 1fr);
+  gap: 10px;
+}
+
+[data-cag="pos-dashboard"] .cag-field {
+  grid-column: span 6;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+[data-cag="pos-dashboard"] .cag-field-full {
+  grid-column: span 12;
+}
+
+[data-cag="pos-dashboard"] .cag-field label {
+  font-size: 12px;
+  color: var(--cag-muted);
+}
+
+[data-cag="pos-dashboard"] .cag-form-actions {
+  display: flex;
+  gap: 10px;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  margin-top: 12px;
+}
+
+[data-cag="pos-dashboard"] .cag-multi {
+  max-height: 220px;
+  overflow: auto;
+  border: 1px solid rgba(17, 24, 39, 0.10);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.75);
+  padding: 10px;
+}
+
+[data-cag="pos-dashboard"] .cag-check {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 8px 8px;
+  border-radius: 12px;
+}
+
+[data-cag="pos-dashboard"] .cag-check:hover {
+  background: rgba(14, 165, 164, 0.06);
+}
+
+[data-cag="pos-dashboard"] .cag-check input {
+  margin-top: 2px;
+}
+
+[data-cag="pos-dashboard"] .cag-toast-stack {
+  position: fixed;
+  z-index: 999999;
+  right: 14px;
+  bottom: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-width: min(420px, calc(100vw - 28px));
+}
+
+[data-cag="pos-dashboard"] .cag-toast {
+  border-radius: 16px;
+  padding: 12px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  color: #ffffff;
+  background: rgba(17, 24, 39, 0.92);
+  box-shadow: 0 18px 52px rgba(0, 0, 0, 0.25);
+  animation: cag-toast-in 200ms ease both;
+}
+
+[data-cag="pos-dashboard"] .cag-toast a {
+  color: #ffffff;
+  text-decoration: underline;
+}
+
+[data-cag="pos-dashboard"] .cag-toast[data-kind="ok"] {
+  background: rgba(22, 163, 74, 0.92);
+}
+
+[data-cag="pos-dashboard"] .cag-toast[data-kind="warn"] {
+  background: rgba(217, 119, 6, 0.92);
+}
+
+[data-cag="pos-dashboard"] .cag-toast[data-kind="err"] {
+  background: rgba(220, 38, 38, 0.92);
+}
+
+@keyframes cag-toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+[data-cag="pos-dashboard"] .cag-login {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 12px;
+  max-width: 560px;
+  margin: 30px auto 10px auto;
+  padding: 16px;
+  border-radius: 18px;
+  border: 1px solid var(--cag-border);
+  background: rgba(255, 255, 255, 0.82);
+  backdrop-filter: blur(10px);
+}
+
+[data-cag="pos-dashboard"] .cag-login h1 {
+  margin: 0;
+  font-size: 18px;
+  letter-spacing: -0.02em;
+}
+
+[data-cag="pos-dashboard"] .cag-login p {
+  margin: 0;
+  color: var(--cag-muted);
+  font-size: 13px;
+}
+
+[data-cag="pos-dashboard"] .cag-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  border-radius: 999px;
+  padding: 6px 10px;
+  border: 1px solid rgba(14, 165, 164, 0.28);
+  background: rgba(14, 165, 164, 0.10);
+  color: var(--cag-brand-ink);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+[data-cag="pos-dashboard"] .cag-skeleton {
+  border-radius: 14px;
+  height: 12px;
+  background: linear-gradient(
+    90deg,
+    rgba(17, 24, 39, 0.06) 0%,
+    rgba(17, 24, 39, 0.12) 40%,
+    rgba(17, 24, 39, 0.06) 80%
+  );
+  background-size: 240px 100%;
+  animation: cag-shimmer 900ms linear infinite;
+}
+
+@keyframes cag-shimmer {
+  0% {
+    background-position: -240px 0;
+  }
+  100% {
+    background-position: 240px 0;
+  }
+}
+
+@media (max-width: 900px) {
+  [data-cag="pos-dashboard"] .cag-card {
+    grid-column: span 6;
+  }
+  [data-cag="pos-dashboard"] .cag-split {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 560px) {
+  [data-cag="pos-dashboard"] .cag-card {
+    grid-column: span 12;
+  }
+  [data-cag="pos-dashboard"] .cag-field {
+    grid-column: span 12;
+  }
+}
+
