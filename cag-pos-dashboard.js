@@ -1293,6 +1293,7 @@
         var series = (r && (r.series || (r.data && r.data.series))) || [];
         var topProducts = (r && (r.topProducts || (r.data && r.data.topProducts))) || [];
         var topOffers = (r && (r.topOffers || (r.data && r.data.topOffers))) || [];
+        var productResults = (r && (r.productResults || (r.data && r.data.productResults))) || [];
         var byHour = (r && (r.byHour || (r.data && r.data.byHour))) || [];
         var byWeekday = (r && (r.byWeekday || (r.data && r.data.byWeekday))) || [];
 
@@ -1305,6 +1306,7 @@
         state.series = Array.isArray(series) ? series : [];
         state.topProducts = Array.isArray(topProducts) ? topProducts : [];
         state.topOffers = Array.isArray(topOffers) ? topOffers : [];
+        state.productResults = Array.isArray(productResults) ? productResults : [];
         state.byHour = Array.isArray(byHour) ? byHour : [];
         state.byWeekday = Array.isArray(byWeekday) ? byWeekday : [];
 
@@ -1485,6 +1487,127 @@
 
         var grid2b = el("div", { class: "cag-grid-2" }, pWeekday, pAvgTicket);
         view.appendChild(grid2b);
+
+        // ---- Full product performance ----
+        if (!state.overviewProducts) state.overviewProducts = { q: "", page: 1, pageSize: 25 };
+        var perf = state.overviewProducts;
+        var perfPanel = el("div", { class: "cag-panel" }, el("h2", { text: "Résultat par produit (liste complète)" }));
+        var perfSearch = el("input", {
+          class: "cag-input",
+          type: "search",
+          placeholder: "Filtrer (nom / catégorie)",
+          value: perf.q || "",
+        });
+        var perfPrev = el("button", { class: "cag-btn", type: "button", text: "Précédent" });
+        var perfNext = el("button", { class: "cag-btn", type: "button", text: "Suivant" });
+        var perfToolbar = el(
+          "div",
+          { class: "cag-toolbar" },
+          el("div", { class: "cag-toolbar-left" }, perfSearch),
+          el("div", { class: "cag-toolbar-right" }, perfPrev, perfNext)
+        );
+        perfPanel.appendChild(perfToolbar);
+
+        function rowProfitBadge(v) {
+          if (v == null || !Number.isFinite(Number(v))) return "—";
+          var n = Number(v);
+          return (n >= 0 ? "+" : "") + fmtMoney(n);
+        }
+
+        function renderPerfTable() {
+          var raw = Array.isArray(state.productResults) ? state.productResults : [];
+          var q = String(perf.q || "").trim().toLowerCase();
+          var filtered = raw.filter(function (it) {
+            if (!q) return true;
+            var nm = String((it && (it.name || it.productName || "")) || "").toLowerCase();
+            var cat = String((it && (it.category || it.productType || "")) || "").toLowerCase();
+            return nm.indexOf(q) !== -1 || cat.indexOf(q) !== -1;
+          });
+
+          var total = filtered.length;
+          var pages = Math.max(1, Math.ceil(total / perf.pageSize));
+          perf.page = clamp(perf.page, 1, pages);
+          var start = (perf.page - 1) * perf.pageSize;
+          var items = filtered.slice(start, start + perf.pageSize);
+
+          var rows3 = items.map(function (it) {
+            var marginPct = toNumber(it.marginPct);
+            return el(
+              "tr",
+              {},
+              el("td", { text: it.name || "—" }),
+              el("td", { text: it.category || "—" }),
+              el("td", { text: it.salesCount == null ? "—" : String(it.salesCount) }),
+              el("td", { text: it.qty == null ? "—" : String(it.qty) }),
+              el("td", { text: fmtMoney(it.revenue) }),
+              el("td", { text: fmtMoney(it.cost) }),
+              el("td", { text: rowProfitBadge(it.profit) }),
+              el("td", { text: marginPct == null ? "—" : marginPct.toFixed(1) + "%" })
+            );
+          });
+
+          var t3 = table(["Produit", "Catégorie", "Nb ventes", "Qté", "CA", "Coût", "Résultat", "Marge"], rows3);
+          var wrap = el("div", { class: "cag-scroll-x" }, t3);
+          var footer3 = el(
+            "div",
+            { class: "cag-footer-row" },
+            el(
+              "div",
+              {
+                class: "cag-small",
+                text:
+                  "Produits: " +
+                  total +
+                  " • Page " +
+                  perf.page +
+                  " / " +
+                  pages +
+                  " • Catégorie: " +
+                  categoryLabel(),
+              }
+            )
+          );
+
+          $all(".cag-scroll-x, .cag-footer-row", perfPanel).forEach(function (n) {
+            if (n && n.parentNode) n.parentNode.removeChild(n);
+          });
+          perfPanel.appendChild(wrap);
+          perfPanel.appendChild(footer3);
+
+          perfPrev.disabled = perf.page <= 1;
+          perfNext.disabled = perf.page >= pages;
+        }
+
+        function debounce(fn, ms) {
+          var t = null;
+          return function () {
+            var args = arguments;
+            window.clearTimeout(t);
+            t = window.setTimeout(function () {
+              fn.apply(null, args);
+            }, ms);
+          };
+        }
+
+        perfSearch.addEventListener(
+          "input",
+          debounce(function () {
+            perf.q = perfSearch.value || "";
+            perf.page = 1;
+            renderPerfTable();
+          }, 220)
+        );
+        perfPrev.addEventListener("click", function () {
+          perf.page = Math.max(1, perf.page - 1);
+          renderPerfTable();
+        });
+        perfNext.addEventListener("click", function () {
+          perf.page = perf.page + 1;
+          renderPerfTable();
+        });
+
+        renderPerfTable();
+        view.appendChild(perfPanel);
 
         // Update subtitle in topbar with actual sales count
         var sub = $(".cag-brand-sub", shell);
@@ -2193,8 +2316,10 @@
       series: [],
       topProducts: [],
       topOffers: [],
+      productResults: [],
       byHour: [],
       byWeekday: [],
+      overviewProducts: { q: "", page: 1, pageSize: 25 },
       sales: null,
       products: null,
       offers: null,
