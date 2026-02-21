@@ -492,6 +492,11 @@
   margin-top: 12px;
 }
 
+[data-cag="pos-dashboard"] .cag-scroll-x {
+  width: 100%;
+  overflow-x: auto;
+}
+
 [data-cag="pos-dashboard"] .cag-pagination {
   display: flex;
   gap: 8px;
