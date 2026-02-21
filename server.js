@@ -539,20 +539,23 @@ fastify.get(
       byWeekdayRows = weekdayRows || [];
     }
 
-    const [topProductsRows] = await pool.query(
+    const [productResultRows] = await pool.query(
       `SELECT
          p.id_product AS id,
          COALESCE(p.name, CONCAT('Produit #', sd.product_id)) AS name,
+         COALESCE(p.productType, '') AS category,
+         COUNT(DISTINCT s.id_sale) AS salesCount,
          COALESCE(SUM(sd.quantity), 0) AS qty,
-         COALESCE(SUM(COALESCE(sd.total_price, sd.price * sd.quantity)), 0) AS revenue
+         COALESCE(SUM(COALESCE(sd.total_price, sd.price * sd.quantity)), 0) AS revenue,
+         COALESCE(SUM(COALESCE(p.purchasePrice, 0) * sd.quantity), 0) AS cost,
+         COALESCE(SUM(COALESCE(sd.total_price, sd.price * sd.quantity) - (COALESCE(p.purchasePrice, 0) * sd.quantity)), 0) AS profit
        FROM sales_details sd
        JOIN sales s ON s.id_sale = sd.sale_id
        LEFT JOIN products p ON p.id_product = sd.product_id
        WHERE ${salesRangeWhere}
          AND (? = '' OR p.productType = ?)
        GROUP BY p.id_product, p.name, sd.product_id
-       ORDER BY revenue DESC
-       LIMIT 10`,
+       ORDER BY revenue DESC, qty DESC`,
       [r.from, r.toExcl, category, category]
     );
 
@@ -575,6 +578,24 @@ fastify.get(
        LIMIT 10`,
       [r.from, r.toExcl, category, category]
     );
+
+    const productResults = (productResultRows || []).map((x) => {
+      const revenue = Number(x.revenue);
+      const cost = Number(x.cost);
+      const profit = Number(x.profit);
+      const marginPct = revenue ? (profit / revenue) * 100 : 0;
+      return {
+        id: x.id,
+        name: x.name,
+        category: x.category || "",
+        salesCount: Number(x.salesCount),
+        qty: Number(x.qty),
+        revenue,
+        cost,
+        profit,
+        marginPct,
+      };
+    });
 
     reply.send({
       meta: {
@@ -600,7 +621,8 @@ fastify.get(
         revenue: Number(x.revenue),
         salesCount: Number(x.salesCount),
       })),
-      topProducts: (topProductsRows || []).map((x) => ({ id: x.id, name: x.name, qty: Number(x.qty), revenue: Number(x.revenue) })),
+      topProducts: productResults.slice(0, 10).map((x) => ({ id: x.id, name: x.name, qty: x.qty, revenue: x.revenue })),
+      productResults,
       topOffers: (topOffersRows || []).map((x) => ({ id: x.id, name: x.name, qty: Number(x.qty), revenue: Number(x.revenue) })),
     });
   }
