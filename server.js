@@ -13,6 +13,7 @@
 "use strict";
 
 const path = require("path");
+const fs = require("fs");
 // Load env from the same directory as this file (useful on AlwaysData where cwd may differ).
 require("dotenv").config({ path: path.join(__dirname, ".env") });
 
@@ -44,6 +45,12 @@ function parseCsv(s) {
     .filter(Boolean);
 }
 
+function clampHour(v, fallback) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(0, Math.min(23, Math.floor(n)));
+}
+
 const CFG = {
   // AlwaysData may expose either HOST or IP. Prefer HOST, then IP.
   // Default to IPv6 any ("::") because AlwaysData expects an IPv6 listener.
@@ -54,6 +61,8 @@ const CFG = {
   jwtExpires: env("JWT_EXPIRES", "12h"),
   migratePlaintextPasswords: envBool("MIGRATE_PLAINTEXT_PASSWORDS", false),
   migratePlaintextPasswordsOverwrite: envBool("MIGRATE_PLAINTEXT_PASSWORDS_OVERWRITE", false),
+  businessDayStartHour: clampHour(env("BUSINESS_DAY_START_HOUR", "12"), 12),
+  businessDayEndHour: clampHour(env("BUSINESS_DAY_END_HOUR", "3"), 3),
   corsOrigins: parseCsv(env("CORS_ORIGINS", "https://mybusinesslife.fr,https://www.mybusinesslife.fr")),
   enforceRoles: envBool("ENFORCE_ROLES", true),
   writeRoles: parseCsv(env("WRITE_ROLES", "admin,manager")).map((r) => r.toLowerCase()),
@@ -66,6 +75,10 @@ const CFG = {
     connectionLimit: Number(env("DB_CONN_LIMIT", "10")),
   },
 };
+
+const BUSINESS_START_TIME = `${String(CFG.businessDayStartHour).padStart(2, "0")}:00:00`;
+const BUSINESS_END_TIME = `${String(CFG.businessDayEndHour).padStart(2, "0")}:00:00`;
+const BUSINESS_CROSSES_MIDNIGHT = CFG.businessDayStartHour >= CFG.businessDayEndHour;
 
 if (!CFG.jwtSecret) {
   // Fail closed: no secret means no auth.
@@ -99,11 +112,50 @@ fastify.register(cors, {
   origin: (origin, cb) => {
     // Allow server-to-server or curl without Origin header.
     if (!origin) return cb(null, true);
+    // If origin isn't allowed, we simply disable CORS headers.
+    // Browsers will then block XHR/fetch automatically, without breaking script/css loads.
     if (CFG.corsOrigins.includes(origin)) return cb(null, true);
-    cb(new Error("CORS blocked"), false);
+    cb(null, false);
   },
   methods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
 });
+
+// ---- STATIC (optional) ----
+// If `cag-pos-dashboard.js/css` are deployed next to server.js (or one directory above),
+// you can load them from the same AlwaysData domain:
+// - https://<site>/cag-pos-dashboard.js
+// - https://<site>/cag-pos-dashboard.css
+function resolveAsset(fileName) {
+  const candidates = [
+    path.join(__dirname, fileName),
+    path.join(__dirname, "..", fileName),
+  ];
+  for (const p of candidates) {
+    try {
+      if (fs.statSync(p).isFile()) return p;
+    } catch (_) {
+      // continue
+    }
+  }
+  return null;
+}
+
+const ASSET_PATHS = {
+  js: resolveAsset("cag-pos-dashboard.js"),
+  css: resolveAsset("cag-pos-dashboard.css"),
+};
+
+function sendAsset(reply, kind) {
+  const p = ASSET_PATHS[kind];
+  if (!p) return sendError(reply, 404, "Asset not found", { kind });
+  const buf = fs.readFileSync(p);
+  reply.header("Cache-Control", "public, max-age=300");
+  if (kind === "js") reply.type("application/javascript; charset=utf-8").send(buf);
+  else reply.type("text/css; charset=utf-8").send(buf);
+}
+
+fastify.get("/cag-pos-dashboard.js", async (_req, reply) => sendAsset(reply, "js"));
+fastify.get("/cag-pos-dashboard.css", async (_req, reply) => sendAsset(reply, "css"));
 
 function sendError(reply, status, message, extra) {
   reply.code(status).send(Object.assign({ message }, extra || {}));
@@ -126,9 +178,31 @@ function addDaysIso(iso, deltaDays) {
 
 function rangeToSql(fromIso, toIso) {
   if (!isISODate(fromIso) || !isISODate(toIso)) return null;
-  const from = `${fromIso} 00:00:00`;
-  const toExcl = `${addDaysIso(toIso, 1)} 00:00:00`;
-  return { from, toExcl };
+  const from = `${fromIso} ${BUSINESS_START_TIME}`;
+  const endDay = BUSINESS_CROSSES_MIDNIGHT ? addDaysIso(toIso, 1) : toIso;
+  const toExcl = `${endDay} ${BUSINESS_END_TIME}`;
+  return { from, toExcl, businessStartTime: BUSINESS_START_TIME, businessEndTime: BUSINESS_END_TIME };
+}
+
+function businessWindowSql(columnExpr) {
+  if (BUSINESS_CROSSES_MIDNIGHT) {
+    return `(TIME(${columnExpr}) >= '${BUSINESS_START_TIME}' OR TIME(${columnExpr}) < '${BUSINESS_END_TIME}')`;
+  }
+  return `(TIME(${columnExpr}) >= '${BUSINESS_START_TIME}' AND TIME(${columnExpr}) < '${BUSINESS_END_TIME}')`;
+}
+
+function businessDateSql(columnExpr) {
+  if (BUSINESS_CROSSES_MIDNIGHT) {
+    return `CASE
+      WHEN TIME(${columnExpr}) < '${BUSINESS_END_TIME}' THEN DATE_SUB(DATE(${columnExpr}), INTERVAL 1 DAY)
+      ELSE DATE(${columnExpr})
+    END`;
+  }
+  return `DATE(${columnExpr})`;
+}
+
+function normalizeCategory(raw) {
+  return typeof raw === "string" ? raw.trim() : "";
 }
 
 function parseRoles(raw) {
@@ -305,42 +379,165 @@ fastify.get(
   async (req, reply) => {
     const fromIso = req.query && req.query.from;
     const toIso = req.query && req.query.to;
+    const category = normalizeCategory(req.query && req.query.category);
     const r = rangeToSql(fromIso, toIso);
     if (!r) return sendError(reply, 400, "Invalid from/to (expected YYYY-MM-DD)");
+    const salesRangeWhere = `s.last_updated >= ? AND s.last_updated < ? AND ${businessWindowSql("s.last_updated")}`;
+    const businessDateExpr = businessDateSql("s.last_updated");
+    const hourOrderExpr = `CASE
+      WHEN HOUR(s.last_updated) < ${CFG.businessDayEndHour} THEN HOUR(s.last_updated) + 24
+      ELSE HOUR(s.last_updated)
+    END`;
 
-    const [kpiRows] = await pool.query(
-      `SELECT
-         COALESCE(SUM(s.total_amount), 0) AS revenue,
-         COUNT(*) AS salesCount
-       FROM sales s
-       WHERE s.last_updated >= ? AND s.last_updated < ?`,
-      [r.from, r.toExcl]
-    );
-    const kpis = kpiRows && kpiRows[0] ? kpiRows[0] : { revenue: 0, salesCount: 0 };
+    let kpis = { revenue: 0, salesCount: 0 };
+    let profit = 0;
+    let seriesRows = [];
+    let byHourRows = [];
+    let byWeekdayRows = [];
 
-    const [profitRows] = await pool.query(
-      `SELECT
-         COALESCE(SUM(
-           (COALESCE(sd.total_price, sd.price * sd.quantity) - (COALESCE(p.purchasePrice, 0) * sd.quantity))
-         ), 0) AS profit
-       FROM sales_details sd
-       JOIN sales s ON s.id_sale = sd.sale_id
-       LEFT JOIN products p ON p.id_product = sd.product_id
-       WHERE s.last_updated >= ? AND s.last_updated < ?`,
-      [r.from, r.toExcl]
-    );
-    const profit = profitRows && profitRows[0] ? profitRows[0].profit : 0;
+    if (category) {
+      const [kpiRows] = await pool.query(
+        `SELECT
+           COALESCE(SUM(COALESCE(sd.total_price, sd.price * sd.quantity)), 0) AS revenue,
+           COUNT(DISTINCT s.id_sale) AS salesCount
+         FROM sales_details sd
+         JOIN sales s ON s.id_sale = sd.sale_id
+         JOIN products p ON p.id_product = sd.product_id
+         WHERE ${salesRangeWhere}
+           AND p.productType = ?`,
+        [r.from, r.toExcl, category]
+      );
+      kpis = kpiRows && kpiRows[0] ? kpiRows[0] : { revenue: 0, salesCount: 0 };
 
-    const [seriesRows] = await pool.query(
-      `SELECT
-         DATE(s.last_updated) AS date,
-         COALESCE(SUM(s.total_amount), 0) AS revenue
-       FROM sales s
-       WHERE s.last_updated >= ? AND s.last_updated < ?
-       GROUP BY DATE(s.last_updated)
-       ORDER BY DATE(s.last_updated) ASC`,
-      [r.from, r.toExcl]
-    );
+      const [profitRows] = await pool.query(
+        `SELECT
+           COALESCE(SUM(
+             (COALESCE(sd.total_price, sd.price * sd.quantity) - (COALESCE(p.purchasePrice, 0) * sd.quantity))
+           ), 0) AS profit
+         FROM sales_details sd
+         JOIN sales s ON s.id_sale = sd.sale_id
+         JOIN products p ON p.id_product = sd.product_id
+         WHERE ${salesRangeWhere}
+           AND p.productType = ?`,
+        [r.from, r.toExcl, category]
+      );
+      profit = profitRows && profitRows[0] ? profitRows[0].profit : 0;
+
+      const [series] = await pool.query(
+        `SELECT
+           ${businessDateExpr} AS date,
+           COALESCE(SUM(COALESCE(sd.total_price, sd.price * sd.quantity)), 0) AS revenue,
+           COUNT(DISTINCT s.id_sale) AS salesCount,
+           COALESCE(
+             SUM(COALESCE(sd.total_price, sd.price * sd.quantity)) / NULLIF(COUNT(DISTINCT s.id_sale), 0),
+             0
+           ) AS avgTicket
+         FROM sales_details sd
+         JOIN sales s ON s.id_sale = sd.sale_id
+         JOIN products p ON p.id_product = sd.product_id
+         WHERE ${salesRangeWhere}
+           AND p.productType = ?
+         GROUP BY ${businessDateExpr}
+         ORDER BY ${businessDateExpr} ASC`,
+        [r.from, r.toExcl, category]
+      );
+      seriesRows = series || [];
+
+      const [hourRows] = await pool.query(
+        `SELECT
+           HOUR(s.last_updated) AS hour,
+           COALESCE(SUM(COALESCE(sd.total_price, sd.price * sd.quantity)), 0) AS revenue,
+           COUNT(DISTINCT s.id_sale) AS salesCount
+         FROM sales_details sd
+         JOIN sales s ON s.id_sale = sd.sale_id
+         JOIN products p ON p.id_product = sd.product_id
+         WHERE ${salesRangeWhere}
+           AND p.productType = ?
+         GROUP BY HOUR(s.last_updated)
+         ORDER BY ${hourOrderExpr} ASC`,
+        [r.from, r.toExcl, category]
+      );
+      byHourRows = hourRows || [];
+
+      const [weekdayRows] = await pool.query(
+        `SELECT
+           WEEKDAY(${businessDateExpr}) AS weekday,
+           COALESCE(SUM(COALESCE(sd.total_price, sd.price * sd.quantity)), 0) AS revenue,
+           COUNT(DISTINCT s.id_sale) AS salesCount
+         FROM sales_details sd
+         JOIN sales s ON s.id_sale = sd.sale_id
+         JOIN products p ON p.id_product = sd.product_id
+         WHERE ${salesRangeWhere}
+           AND p.productType = ?
+         GROUP BY WEEKDAY(${businessDateExpr})
+         ORDER BY WEEKDAY(${businessDateExpr}) ASC`,
+        [r.from, r.toExcl, category]
+      );
+      byWeekdayRows = weekdayRows || [];
+    } else {
+      const [kpiRows] = await pool.query(
+        `SELECT
+           COALESCE(SUM(s.total_amount), 0) AS revenue,
+           COUNT(*) AS salesCount
+         FROM sales s
+         WHERE ${salesRangeWhere}`,
+        [r.from, r.toExcl]
+      );
+      kpis = kpiRows && kpiRows[0] ? kpiRows[0] : { revenue: 0, salesCount: 0 };
+
+      const [profitRows] = await pool.query(
+        `SELECT
+           COALESCE(SUM(
+             (COALESCE(sd.total_price, sd.price * sd.quantity) - (COALESCE(p.purchasePrice, 0) * sd.quantity))
+           ), 0) AS profit
+         FROM sales_details sd
+         JOIN sales s ON s.id_sale = sd.sale_id
+         LEFT JOIN products p ON p.id_product = sd.product_id
+         WHERE ${salesRangeWhere}`,
+        [r.from, r.toExcl]
+      );
+      profit = profitRows && profitRows[0] ? profitRows[0].profit : 0;
+
+      const [series] = await pool.query(
+        `SELECT
+           ${businessDateExpr} AS date,
+           COALESCE(SUM(s.total_amount), 0) AS revenue,
+           COUNT(*) AS salesCount,
+           COALESCE(AVG(s.total_amount), 0) AS avgTicket
+         FROM sales s
+         WHERE ${salesRangeWhere}
+         GROUP BY ${businessDateExpr}
+         ORDER BY ${businessDateExpr} ASC`,
+        [r.from, r.toExcl]
+      );
+      seriesRows = series || [];
+
+      const [hourRows] = await pool.query(
+        `SELECT
+           HOUR(s.last_updated) AS hour,
+           COALESCE(SUM(s.total_amount), 0) AS revenue,
+           COUNT(*) AS salesCount
+         FROM sales s
+         WHERE ${salesRangeWhere}
+         GROUP BY HOUR(s.last_updated)
+         ORDER BY ${hourOrderExpr} ASC`,
+        [r.from, r.toExcl]
+      );
+      byHourRows = hourRows || [];
+
+      const [weekdayRows] = await pool.query(
+        `SELECT
+           WEEKDAY(${businessDateExpr}) AS weekday,
+           COALESCE(SUM(s.total_amount), 0) AS revenue,
+           COUNT(*) AS salesCount
+         FROM sales s
+         WHERE ${salesRangeWhere}
+         GROUP BY WEEKDAY(${businessDateExpr})
+         ORDER BY WEEKDAY(${businessDateExpr}) ASC`,
+        [r.from, r.toExcl]
+      );
+      byWeekdayRows = weekdayRows || [];
+    }
 
     const [topProductsRows] = await pool.query(
       `SELECT
@@ -351,11 +548,12 @@ fastify.get(
        FROM sales_details sd
        JOIN sales s ON s.id_sale = sd.sale_id
        LEFT JOIN products p ON p.id_product = sd.product_id
-       WHERE s.last_updated >= ? AND s.last_updated < ?
+       WHERE ${salesRangeWhere}
+         AND (? = '' OR p.productType = ?)
        GROUP BY p.id_product, p.name, sd.product_id
        ORDER BY revenue DESC
        LIMIT 10`,
-      [r.from, r.toExcl]
+      [r.from, r.toExcl, category, category]
     );
 
     // "Top offers" is best-effort: it attributes sold products that belong to an offer.
@@ -367,23 +565,41 @@ fastify.get(
          COALESCE(SUM(COALESCE(sd.total_price, sd.price * sd.quantity)), 0) AS revenue
        FROM sales_details sd
        JOIN sales s ON s.id_sale = sd.sale_id
+       JOIN products p ON p.id_product = sd.product_id
        JOIN product_offers_products op ON op.product_id = sd.product_id
        JOIN product_offers o ON o.id_offer = op.offer_id
-       WHERE s.last_updated >= ? AND s.last_updated < ?
+       WHERE ${salesRangeWhere}
+         AND (? = '' OR p.productType = ?)
        GROUP BY o.id_offer, o.name
        ORDER BY revenue DESC
        LIMIT 10`,
-      [r.from, r.toExcl]
+      [r.from, r.toExcl, category, category]
     );
 
     reply.send({
+      meta: {
+        category,
+        businessDayStartHour: CFG.businessDayStartHour,
+        businessDayEndHour: CFG.businessDayEndHour,
+      },
       kpis: {
         revenue: Number(kpis.revenue),
         profit: Number(profit),
         salesCount: Number(kpis.salesCount),
         avgTicket: kpis.salesCount ? Number(kpis.revenue) / Number(kpis.salesCount) : 0,
       },
-      series: (seriesRows || []).map((x) => ({ date: String(x.date), revenue: Number(x.revenue) })),
+      series: (seriesRows || []).map((x) => ({
+        date: String(x.date),
+        revenue: Number(x.revenue),
+        salesCount: Number(x.salesCount),
+        avgTicket: Number(x.avgTicket),
+      })),
+      byHour: (byHourRows || []).map((x) => ({ hour: Number(x.hour), revenue: Number(x.revenue), salesCount: Number(x.salesCount) })),
+      byWeekday: (byWeekdayRows || []).map((x) => ({
+        weekday: Number(x.weekday),
+        revenue: Number(x.revenue),
+        salesCount: Number(x.salesCount),
+      })),
       topProducts: (topProductsRows || []).map((x) => ({ id: x.id, name: x.name, qty: Number(x.qty), revenue: Number(x.revenue) })),
       topOffers: (topOffersRows || []).map((x) => ({ id: x.id, name: x.name, qty: Number(x.qty), revenue: Number(x.revenue) })),
     });
@@ -399,6 +615,7 @@ fastify.get(
   async (req, reply) => {
     const fromIso = req.query && req.query.from;
     const toIso = req.query && req.query.to;
+    const category = normalizeCategory(req.query && req.query.category);
     const r = rangeToSql(fromIso, toIso);
     if (!r) return sendError(reply, 400, "Invalid from/to (expected YYYY-MM-DD)");
 
@@ -407,44 +624,94 @@ fastify.get(
     const offset = clampInt(req.query && req.query.offset, 0, 1_000_000, 0);
     const like = "%" + q + "%";
     const qNum = /^\d+$/.test(q) ? Number(q) : -1;
+    const salesRangeWhere = `s.last_updated >= ? AND s.last_updated < ? AND ${businessWindowSql("s.last_updated")}`;
 
-    const [totalRows] = await pool.query(
-      `SELECT COUNT(*) AS total
-       FROM sales s
-       LEFT JOIN users u ON u.id_user = s.user_id
-       WHERE s.last_updated >= ? AND s.last_updated < ?
-         AND (
-           ? = '' OR s.notes LIKE ? OR u.username LIKE ? OR s.id_sale = ?
-         )`,
-      [r.from, r.toExcl, q, like, like, qNum]
-    );
-    const total = totalRows && totalRows[0] ? Number(totalRows[0].total) : 0;
+    let total = 0;
+    let rows = [];
 
-    const [rows] = await pool.query(
-      `SELECT
-         s.id_sale,
-         s.total_amount,
-         s.notes,
-         s.user_id,
-         u.username,
-         s.last_updated,
-         (
-           SELECT COALESCE(SUM(sd.quantity), 0)
-           FROM sales_details sd
-           WHERE sd.sale_id = s.id_sale
-         ) AS items_count
-       FROM sales s
-       LEFT JOIN users u ON u.id_user = s.user_id
-       WHERE s.last_updated >= ? AND s.last_updated < ?
-         AND (
-           ? = '' OR s.notes LIKE ? OR u.username LIKE ? OR s.id_sale = ?
-         )
-       ORDER BY s.last_updated DESC
-       LIMIT ? OFFSET ?`,
-      [r.from, r.toExcl, q, like, like, qNum, limit, offset]
-    );
+    if (category) {
+      const [totalRows] = await pool.query(
+        `SELECT COUNT(DISTINCT s.id_sale) AS total
+         FROM sales s
+         JOIN sales_details sd ON sd.sale_id = s.id_sale
+         JOIN products p ON p.id_product = sd.product_id
+         LEFT JOIN users u ON u.id_user = s.user_id
+         WHERE ${salesRangeWhere}
+           AND p.productType = ?
+           AND (
+             ? = '' OR s.notes LIKE ? OR u.username LIKE ? OR s.id_sale = ? OR p.name LIKE ? OR p.reference LIKE ?
+           )`,
+        [r.from, r.toExcl, category, q, like, like, qNum, like, like]
+      );
+      total = totalRows && totalRows[0] ? Number(totalRows[0].total) : 0;
+
+      const [filteredRows] = await pool.query(
+        `SELECT
+           s.id_sale,
+           COALESCE(SUM(COALESCE(sd.total_price, sd.price * sd.quantity)), 0) AS total_amount,
+           s.notes,
+           s.user_id,
+           u.username,
+           s.last_updated,
+           COALESCE(SUM(sd.quantity), 0) AS items_count
+         FROM sales s
+         JOIN sales_details sd ON sd.sale_id = s.id_sale
+         JOIN products p ON p.id_product = sd.product_id
+         LEFT JOIN users u ON u.id_user = s.user_id
+         WHERE ${salesRangeWhere}
+           AND p.productType = ?
+           AND (
+             ? = '' OR s.notes LIKE ? OR u.username LIKE ? OR s.id_sale = ? OR p.name LIKE ? OR p.reference LIKE ?
+           )
+         GROUP BY s.id_sale, s.notes, s.user_id, u.username, s.last_updated
+         ORDER BY s.last_updated DESC
+         LIMIT ? OFFSET ?`,
+        [r.from, r.toExcl, category, q, like, like, qNum, like, like, limit, offset]
+      );
+      rows = filteredRows || [];
+    } else {
+      const [totalRows] = await pool.query(
+        `SELECT COUNT(*) AS total
+         FROM sales s
+         LEFT JOIN users u ON u.id_user = s.user_id
+         WHERE ${salesRangeWhere}
+           AND (
+             ? = '' OR s.notes LIKE ? OR u.username LIKE ? OR s.id_sale = ?
+           )`,
+        [r.from, r.toExcl, q, like, like, qNum]
+      );
+      total = totalRows && totalRows[0] ? Number(totalRows[0].total) : 0;
+
+      const [allRows] = await pool.query(
+        `SELECT
+           s.id_sale,
+           s.total_amount,
+           s.notes,
+           s.user_id,
+           u.username,
+           s.last_updated,
+           (
+             SELECT COALESCE(SUM(sd.quantity), 0)
+             FROM sales_details sd
+             WHERE sd.sale_id = s.id_sale
+           ) AS items_count
+         FROM sales s
+         LEFT JOIN users u ON u.id_user = s.user_id
+         WHERE ${salesRangeWhere}
+           AND (
+             ? = '' OR s.notes LIKE ? OR u.username LIKE ? OR s.id_sale = ?
+           )
+         ORDER BY s.last_updated DESC
+         LIMIT ? OFFSET ?`,
+        [r.from, r.toExcl, q, like, like, qNum, limit, offset]
+      );
+      rows = allRows || [];
+    }
 
     reply.send({
+      meta: {
+        category,
+      },
       total,
       items: (rows || []).map((x) => ({
         id_sale: x.id_sale,
@@ -467,6 +734,7 @@ fastify.get(
   async (req, reply) => {
     const saleId = req.params && req.params.id;
     const id = /^\d+$/.test(String(saleId)) ? Number(saleId) : null;
+    const category = normalizeCategory(req.query && req.query.category);
     if (!id) return sendError(reply, 400, "Invalid sale id");
 
     const [saleRows] = await pool.query(
@@ -486,26 +754,42 @@ fastify.get(
     const sale = saleRows && saleRows[0] ? saleRows[0] : null;
     if (!sale) return sendError(reply, 404, "Not found");
 
-    const [detailRows] = await pool.query(
-      `SELECT
-         sd.id_sale_detail,
-         sd.sale_id,
-         sd.product_id,
-         p.name AS product_name,
-         sd.quantity,
-         sd.price,
-         sd.total_price
-       FROM sales_details sd
-       LEFT JOIN products p ON p.id_product = sd.product_id
-       WHERE sd.sale_id = ?
-       ORDER BY sd.id_sale_detail ASC`,
-      [id]
-    );
+    const detailSql = category
+      ? `SELECT
+           sd.id_sale_detail,
+           sd.sale_id,
+           sd.product_id,
+           p.name AS product_name,
+           sd.quantity,
+           sd.price,
+           sd.total_price
+         FROM sales_details sd
+         LEFT JOIN products p ON p.id_product = sd.product_id
+         WHERE sd.sale_id = ?
+           AND p.productType = ?
+         ORDER BY sd.id_sale_detail ASC`
+      : `SELECT
+           sd.id_sale_detail,
+           sd.sale_id,
+           sd.product_id,
+           p.name AS product_name,
+           sd.quantity,
+           sd.price,
+           sd.total_price
+         FROM sales_details sd
+         LEFT JOIN products p ON p.id_product = sd.product_id
+         WHERE sd.sale_id = ?
+         ORDER BY sd.id_sale_detail ASC`;
+    const [detailRows] = await pool.query(detailSql, category ? [id, category] : [id]);
+    const filteredTotal = (detailRows || []).reduce((acc, d) => {
+      const line = d.total_price == null ? Number(d.price) * Number(d.quantity) : Number(d.total_price);
+      return acc + (Number.isFinite(line) ? line : 0);
+    }, 0);
 
     reply.send({
       sale: {
         id_sale: sale.id_sale,
-        total_amount: Number(sale.total_amount),
+        total_amount: category ? Number(filteredTotal) : Number(sale.total_amount),
         notes: sale.notes || "",
         user_id: sale.user_id,
         username: sale.username || "",
@@ -525,6 +809,26 @@ fastify.get(
 );
 
 // ---- PRODUCTS ----
+fastify.get(
+  CFG.apiPrefix + "/products/categories",
+  {
+    preHandler: requireAuth,
+  },
+  async () => {
+    const [rows] = await pool.query(
+      `SELECT DISTINCT TRIM(p.productType) AS name
+       FROM products p
+       WHERE p.productType IS NOT NULL
+         AND TRIM(p.productType) <> ''
+       ORDER BY TRIM(p.productType) ASC`
+    );
+    const items = (rows || [])
+      .map((r) => (r && typeof r.name === "string" ? r.name.trim() : ""))
+      .filter(Boolean);
+    return { items };
+  }
+);
+
 fastify.get(
   CFG.apiPrefix + "/products",
   {
