@@ -10,6 +10,7 @@
  * - GET    /sales?from&to&q&limit&offset        -> { items, total }
  * - GET    /sales/:id                          -> { sale, details }
  * - GET    /products?q&limit&offset             -> { items, total }
+ * - GET    /products/categories                  -> { items: ["alimentaire", ...] }
  * - POST   /products                            body: { ... } -> { product }
  * - PATCH  /products/:id                         body: { ... } -> { product }
  * - DELETE /products/:id
@@ -197,6 +198,7 @@
     var epSummary = (root.getAttribute("data-ep-summary") || "/dashboard/summary").trim();
     var epSales = (root.getAttribute("data-ep-sales") || "/sales").trim();
     var epProducts = (root.getAttribute("data-ep-products") || "/products").trim();
+    var epProductCategories = (root.getAttribute("data-ep-product-categories") || "/products/categories").trim();
     var epOffers = (root.getAttribute("data-ep-offers") || "/offers").trim();
 
     return {
@@ -217,6 +219,7 @@
       epSummary: epSummary,
       epSales: epSales,
       epProducts: epProducts,
+      epProductCategories: epProductCategories,
       epOffers: epOffers,
     };
   }
@@ -594,6 +597,7 @@
 
     var fromInput = el("input", { class: "cag-input", type: "date", value: state.range.from });
     var toInput = el("input", { class: "cag-input", type: "date", value: state.range.to });
+    var categorySelect = el("select", { class: "cag-select cag-select-category" }, el("option", { value: "", text: "Toutes catégories" }));
 
     function presetBtn(label, id) {
       return el("button", { class: "cag-preset", type: "button", text: label, "data-range": id });
@@ -620,9 +624,9 @@
       el("span", { text: state.user ? state.user.username : "Session" })
     );
 
-    var actions = el(
+    var filters = el(
       "div",
-      { class: "cag-actions" },
+      { class: "cag-filters" },
       el(
         "div",
         { class: "cag-range" },
@@ -632,9 +636,16 @@
         toInput
       ),
       presets,
-      refreshBtn,
-      userPill,
-      logoutBtn
+      el("div", { class: "cag-category-wrap" }, el("label", { text: "Catégorie" }), categorySelect)
+    );
+
+    var actionButtons = el("div", { class: "cag-action-buttons" }, refreshBtn, userPill, logoutBtn);
+
+    var actions = el(
+      "div",
+      { class: "cag-actions" },
+      filters,
+      actionButtons
     );
 
     var topbar = el("div", { class: "cag-topbar" }, left, actions);
@@ -642,6 +653,7 @@
       topbar: topbar,
       fromInput: fromInput,
       toInput: toInput,
+      categorySelect: categorySelect,
       presets: presets,
       refreshBtn: refreshBtn,
       logoutBtn: logoutBtn,
@@ -1056,19 +1068,26 @@
     }
   }
 
-  async function loadSummary(cfg, range) {
-    return apiFetch(cfg, cfg.epSummary, { method: "GET", query: { from: range.from, to: range.to } });
+  async function loadSummary(cfg, range, category) {
+    return apiFetch(cfg, cfg.epSummary, { method: "GET", query: { from: range.from, to: range.to, category: category || "" } });
   }
 
-  async function loadSales(cfg, range, q, limit, offset) {
+  async function loadSales(cfg, range, q, limit, offset, category) {
     return apiFetch(cfg, cfg.epSales, {
       method: "GET",
-      query: { from: range.from, to: range.to, q: q || "", limit: limit, offset: offset },
+      query: { from: range.from, to: range.to, q: q || "", limit: limit, offset: offset, category: category || "" },
     });
   }
 
-  async function loadSale(cfg, saleId) {
-    return apiFetch(cfg, cfg.epSales + "/" + encodeURIComponent(String(saleId)), { method: "GET" });
+  async function loadSale(cfg, saleId, category) {
+    return apiFetch(cfg, cfg.epSales + "/" + encodeURIComponent(String(saleId)), {
+      method: "GET",
+      query: { category: category || "" },
+    });
+  }
+
+  async function loadProductCategories(cfg) {
+    return apiFetch(cfg, cfg.epProductCategories, { method: "GET" });
   }
 
   async function loadProducts(cfg, q, limit, offset) {
@@ -1110,6 +1129,9 @@
       if (n == null || !Number.isFinite(Number(n))) return "—";
       return String(Math.round(Number(n)));
     };
+    function categoryLabel() {
+      return state.category ? state.category : "Toutes catégories";
+    }
 
     var chrome = renderTopbar(cfg, state, fmtMoney, fmtCompact);
     var tabs = renderTabs(state);
@@ -1127,6 +1149,46 @@
     shell.appendChild(chrome.topbar);
     shell.appendChild(tabs);
     shell.appendChild(main);
+
+    async function refreshCategoryOptions() {
+      try {
+        var r = await loadProductCategories(cfg);
+        var items = (r && (r.items || (r.data && r.data.items) || r.categories || [])) || [];
+        var cats = Array.isArray(items)
+          ? items
+              .map(function (x) {
+                if (typeof x === "string") return x.trim();
+                if (x && typeof x.name === "string") return x.name.trim();
+                if (x && typeof x.productType === "string") return x.productType.trim();
+                return "";
+              })
+              .filter(Boolean)
+          : [];
+        var uniq = [];
+        var seen = Object.create(null);
+        cats.forEach(function (c) {
+          var k = c.toLowerCase();
+          if (seen[k]) return;
+          seen[k] = true;
+          uniq.push(c);
+        });
+        uniq.sort(function (a, b) {
+          return a.localeCompare(b, cfg.locale || "fr", { sensitivity: "base" });
+        });
+
+        chrome.categorySelect.innerHTML = "";
+        chrome.categorySelect.appendChild(el("option", { value: "", text: "Toutes catégories" }));
+        uniq.forEach(function (c) {
+          chrome.categorySelect.appendChild(el("option", { value: c, text: c }));
+        });
+        chrome.categorySelect.value = state.category || "";
+      } catch (_) {
+        // Keep default option only.
+        chrome.categorySelect.innerHTML = "";
+        chrome.categorySelect.appendChild(el("option", { value: "", text: "Toutes catégories" }));
+        chrome.categorySelect.value = "";
+      }
+    }
 
     function onLogout() {
       clearAuth(cfg);
@@ -1170,6 +1232,11 @@
         applyPreset(id);
       });
     }
+    chrome.categorySelect.addEventListener("change", function () {
+      state.category = chrome.categorySelect.value || "";
+      if (state.sales) state.sales.offset = 0;
+      refreshAll();
+    });
 
     function updateRangeFromInputs() {
       var f = chrome.fromInput.value;
@@ -1221,7 +1288,7 @@
       if (!view) return;
 
       try {
-        var r = await loadSummary(cfg, state.range);
+        var r = await loadSummary(cfg, state.range, state.category);
         var k = (r && (r.kpis || r.data && r.data.kpis || r)) || {};
         var series = (r && (r.series || (r.data && r.data.series))) || [];
         var topProducts = (r && (r.topProducts || (r.data && r.data.topProducts))) || [];
@@ -1264,6 +1331,9 @@
             el("div", {
               class: "cag-kpi-sub",
               text:
+                "Catégorie: " +
+                categoryLabel() +
+                " • " +
                 state.range.from +
                 " -> " +
                 state.range.to +
@@ -1285,7 +1355,7 @@
             { class: "cag-card" },
             el("h3", { text: "Nombre de ventes" }),
             el("p", { class: "cag-kpi", text: salesCount == null ? "—" : String(salesCount) }),
-            el("div", { class: "cag-kpi-sub", text: "Ticket moyen: " + fmtMoney(avgTicket) })
+            el("div", { class: "cag-kpi-sub", text: "Ticket moyen: " + fmtMoney(avgTicket) + " • " + categoryLabel() })
           ),
           el(
             "div",
@@ -1467,7 +1537,7 @@
 
       async function run() {
         try {
-          var r = await loadSales(cfg, state.range, state.sales.q, state.sales.limit, state.sales.offset);
+          var r = await loadSales(cfg, state.range, state.sales.q, state.sales.limit, state.sales.offset, state.category);
           var items = (r && (r.items || (r.data && r.data.items) || r.sales)) || [];
           var total = toNumber((r && (r.total || (r.data && r.data.total))) || items.length) || items.length;
           state.sales.total = total;
@@ -1501,7 +1571,7 @@
             "div",
             { class: "cag-footer-row" },
             el("div", { class: "cag-small", text: "Page " + pag.page + " / " + pag.pages + " • Total: " + total }),
-            el("div", { class: "cag-small", text: "Période: " + state.range.from + " -> " + state.range.to })
+            el("div", { class: "cag-small", text: "Période: " + state.range.from + " -> " + state.range.to + " • " + categoryLabel() })
           );
 
           // Replace loading
@@ -1551,7 +1621,7 @@
 
       async function openSaleDetail(saleId) {
         try {
-          var r2 = await loadSale(cfg, saleId);
+          var r2 = await loadSale(cfg, saleId, state.category);
           var saleRaw = (r2 && (r2.sale || (r2.data && r2.data.sale) || r2)) || null;
           var detailsRaw = (r2 && (r2.details || (r2.data && r2.data.details) || r2.items)) || [];
 
@@ -1564,7 +1634,8 @@
               "div",
               { class: "cag-toolbar", style: { marginBottom: "12px" } },
               el("div", { class: "cag-pill" }, el("span", { class: "cag-status-dot" }), "Vente #" + sale.id),
-              el("div", { class: "cag-pill" }, "Total: " + fmtMoney(sale.totalAmount))
+              el("div", { class: "cag-pill" }, "Total: " + fmtMoney(sale.totalAmount)),
+              el("div", { class: "cag-pill" }, "Catégorie: " + categoryLabel())
             )
           );
 
@@ -2067,7 +2138,9 @@
 
     // Initial paint
     setActiveView(shell, state, state.view);
-    refreshAll();
+    refreshCategoryOptions().finally(function () {
+      refreshAll();
+    });
   }
 
   async function mount(root) {
@@ -2114,6 +2187,7 @@
     var state = {
       user: user,
       range: { from: from, to: to },
+      category: "",
       view: "overview",
       kpis: { revenue: null, profit: null, salesCount: null, avgTicket: null },
       series: [],
