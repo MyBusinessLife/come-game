@@ -124,7 +124,7 @@ fastify.register(cors, {
     if (CFG.corsOrigins.includes(origin)) return cb(null, true);
     cb(null, false);
   },
-  methods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+  methods: ["GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"],
 });
 
 // ---- STATIC (optional) ----
@@ -1526,12 +1526,7 @@ fastify.post(
   }
 );
 
-fastify.patch(
-  CFG.apiPrefix + "/products/:id",
-  {
-    preHandler: [requireAuth, requireWrite],
-  },
-  async (req, reply) => {
+const updateProductHandler = async (req, reply) => {
     const idRaw = req.params && req.params.id;
     const id = /^\d+$/.test(String(idRaw)) ? Number(idRaw) : null;
     if (!id) return sendError(reply, 400, "Invalid id");
@@ -1579,7 +1574,22 @@ fastify.patch(
     const [res] = await pool.query(`UPDATE products SET ${fields.join(", ")} WHERE id_product = ?`, values);
     if (!res.affectedRows) return sendError(reply, 404, "Not found");
     reply.send({ ok: true });
-  }
+  };
+
+fastify.patch(
+  CFG.apiPrefix + "/products/:id",
+  {
+    preHandler: [requireAuth, requireWrite],
+  },
+  updateProductHandler
+);
+
+fastify.put(
+  CFG.apiPrefix + "/products/:id",
+  {
+    preHandler: [requireAuth, requireWrite],
+  },
+  updateProductHandler
 );
 
 fastify.delete(
