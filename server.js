@@ -27,6 +27,7 @@ const helmet = require("@fastify/helmet");
 const mysql = require("mysql2/promise");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
+const crypto = require("crypto");
 
 function env(name, fallback) {
   const v = process.env[name];
@@ -103,6 +104,12 @@ const pool = mysql.createPool({
 fastify.decorate("db", pool);
 
 let HAS_PASSWORD_HASH_COLUMN = false;
+let POS_SYNC_TABLE_READY = false;
+const POS_SCHEMA = {
+  sales: new Set(),
+  salesDetails: new Set(),
+  products: new Set(),
+};
 
 fastify.register(helmet, {
   global: true,
@@ -145,6 +152,16 @@ const ASSET_PATHS = {
   css: resolveAsset("cag-pos-dashboard.css"),
 };
 
+const POS_ASSET_PATHS = {
+  index: resolveAsset("pos-app/index.html"),
+  js: resolveAsset("pos-app/app.js"),
+  css: resolveAsset("pos-app/app.css"),
+  sw: resolveAsset("pos-app/sw.js"),
+  manifest: resolveAsset("pos-app/manifest.webmanifest"),
+  iconMain: resolveAsset("pos-app/icons/icon.svg"),
+  iconMaskable: resolveAsset("pos-app/icons/icon-maskable.svg"),
+};
+
 function sendAsset(reply, kind) {
   const p = ASSET_PATHS[kind];
   if (!p) return sendError(reply, 404, "Asset not found", { kind });
@@ -156,6 +173,54 @@ function sendAsset(reply, kind) {
 
 fastify.get("/cag-pos-dashboard.js", async (_req, reply) => sendAsset(reply, "js"));
 fastify.get("/cag-pos-dashboard.css", async (_req, reply) => sendAsset(reply, "css"));
+
+function sendPosAsset(reply, kind) {
+  const p = POS_ASSET_PATHS[kind];
+  if (!p) return sendError(reply, 404, "POS asset not found", { kind });
+  const buf = fs.readFileSync(p);
+  if (kind === "index") {
+    reply.header("Cache-Control", "no-cache");
+    reply.type("text/html; charset=utf-8").send(buf);
+    return;
+  }
+  if (kind === "js") {
+    reply.header("Cache-Control", "public, max-age=300");
+    reply.type("application/javascript; charset=utf-8").send(buf);
+    return;
+  }
+  if (kind === "css") {
+    reply.header("Cache-Control", "public, max-age=300");
+    reply.type("text/css; charset=utf-8").send(buf);
+    return;
+  }
+  if (kind === "sw") {
+    reply.header("Cache-Control", "no-cache");
+    reply.header("Service-Worker-Allowed", "/");
+    reply.type("application/javascript; charset=utf-8").send(buf);
+    return;
+  }
+  if (kind === "manifest") {
+    reply.header("Cache-Control", "public, max-age=300");
+    reply.type("application/manifest+json; charset=utf-8").send(buf);
+    return;
+  }
+  if (kind === "iconMain" || kind === "iconMaskable") {
+    reply.header("Cache-Control", "public, max-age=86400");
+    reply.type("image/svg+xml").send(buf);
+    return;
+  }
+  return sendError(reply, 404, "Unsupported POS asset kind", { kind });
+}
+
+fastify.get("/pos", async (_req, reply) => sendPosAsset(reply, "index"));
+fastify.get("/pos/", async (_req, reply) => sendPosAsset(reply, "index"));
+fastify.get("/pos/index.html", async (_req, reply) => sendPosAsset(reply, "index"));
+fastify.get("/pos/app.js", async (_req, reply) => sendPosAsset(reply, "js"));
+fastify.get("/pos/app.css", async (_req, reply) => sendPosAsset(reply, "css"));
+fastify.get("/pos/sw.js", async (_req, reply) => sendPosAsset(reply, "sw"));
+fastify.get("/pos/manifest.webmanifest", async (_req, reply) => sendPosAsset(reply, "manifest"));
+fastify.get("/pos/icons/icon.svg", async (_req, reply) => sendPosAsset(reply, "iconMain"));
+fastify.get("/pos/icons/icon-maskable.svg", async (_req, reply) => sendPosAsset(reply, "iconMaskable"));
 
 function sendError(reply, status, message, extra) {
   reply.code(status).send(Object.assign({ message }, extra || {}));
@@ -309,6 +374,368 @@ function clampInt(n, min, max, fallback) {
   return Math.max(min, Math.min(max, Math.trunc(x)));
 }
 
+function round2(n) {
+  const x = Number(n);
+  if (!Number.isFinite(x)) return 0;
+  return Math.round((x + Number.EPSILON) * 100) / 100;
+}
+
+function toMysqlUtcDateTime(input) {
+  const d = input ? new Date(input) : new Date();
+  if (!Number.isFinite(d.getTime())) return null;
+  const y = d.getUTCFullYear();
+  const m = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(d.getUTCDate()).padStart(2, "0");
+  const h = String(d.getUTCHours()).padStart(2, "0");
+  const min = String(d.getUTCMinutes()).padStart(2, "0");
+  const s = String(d.getUTCSeconds()).padStart(2, "0");
+  return `${y}-${m}-${day} ${h}:${min}:${s}`;
+}
+
+function asPositiveNumber(v, fallback) {
+  const n = Number(v);
+  if (!Number.isFinite(n) || n < 0) return fallback;
+  return n;
+}
+
+function sanitizeText(v, maxLen) {
+  if (typeof v !== "string") return "";
+  const s = v.trim();
+  if (!s) return "";
+  return s.slice(0, maxLen);
+}
+
+function sanitizeImageUrl(v) {
+  if (v == null) return null;
+  if (typeof v !== "string") return null;
+  const s = v.trim();
+  if (!s) return null;
+  return s.slice(0, 1024);
+}
+
+function sanitizeClientSaleUid(v) {
+  const raw = sanitizeText(v, 128);
+  if (!raw) return "";
+  if (!/^[a-zA-Z0-9._:-]{6,128}$/.test(raw)) return "";
+  return raw;
+}
+
+function normalizePaymentMethod(v) {
+  const method = sanitizeText(v, 32).toLowerCase();
+  if (!method) return "unknown";
+  const allowed = new Set(["cash", "card", "mobile", "transfer", "check", "mixed", "unknown"]);
+  return allowed.has(method) ? method : "unknown";
+}
+
+function parseSaleItems(rawItems) {
+  if (!Array.isArray(rawItems) || !rawItems.length) {
+    const e = new Error("Missing items");
+    e.statusCode = 400;
+    throw e;
+  }
+  const out = [];
+  for (let i = 0; i < rawItems.length; i += 1) {
+    const item = rawItems[i] || {};
+    const productId = Number(item.productId != null ? item.productId : item.product_id);
+    const quantity = Number(item.quantity);
+    const unitPrice = Number(item.unitPrice != null ? item.unitPrice : item.price);
+    if (!Number.isInteger(productId) || productId <= 0) {
+      const e = new Error(`Invalid productId for item #${i + 1}`);
+      e.statusCode = 400;
+      throw e;
+    }
+    if (!Number.isFinite(quantity) || quantity <= 0 || quantity > 100000) {
+      const e = new Error(`Invalid quantity for item #${i + 1}`);
+      e.statusCode = 400;
+      throw e;
+    }
+    if (!Number.isFinite(unitPrice) || unitPrice < 0 || unitPrice > 100000000) {
+      const e = new Error(`Invalid unitPrice for item #${i + 1}`);
+      e.statusCode = 400;
+      throw e;
+    }
+    const lineTotalRaw = item.totalPrice != null ? Number(item.totalPrice) : unitPrice * quantity;
+    const lineTotal = round2(lineTotalRaw);
+    if (!Number.isFinite(lineTotal) || lineTotal < 0 || lineTotal > 100000000) {
+      const e = new Error(`Invalid totalPrice for item #${i + 1}`);
+      e.statusCode = 400;
+      throw e;
+    }
+    out.push({
+      productId,
+      quantity,
+      unitPrice: round2(unitPrice),
+      totalPrice: lineTotal,
+      productName: sanitizeText(item.productName != null ? item.productName : item.product_name, 160),
+    });
+  }
+  return out;
+}
+
+function normalizeSalePayload(rawBody) {
+  const body = rawBody || {};
+  const items = parseSaleItems(body.items);
+  const subtotal = round2(items.reduce((acc, x) => acc + x.totalPrice, 0));
+  const discountAmount = round2(asPositiveNumber(body.discountAmount != null ? body.discountAmount : body.discount_amount, 0));
+  const taxAmount = round2(asPositiveNumber(body.taxAmount != null ? body.taxAmount : body.tax_amount, 0));
+  const computedTotal = round2(Math.max(0, subtotal - discountAmount + taxAmount));
+  const receivedAmount = round2(asPositiveNumber(body.receivedAmount != null ? body.receivedAmount : body.received_amount, 0));
+  const explicitChange = asPositiveNumber(body.changeAmount != null ? body.changeAmount : body.change_amount, null);
+  const changeAmount = round2(explicitChange == null ? Math.max(0, receivedAmount - computedTotal) : explicitChange);
+  const clientSaleUid =
+    sanitizeClientSaleUid(body.clientSaleUid != null ? body.clientSaleUid : body.client_sale_uid) ||
+    `uid-${crypto.randomUUID()}`;
+  const createdAtSql = toMysqlUtcDateTime(body.createdAt != null ? body.createdAt : body.created_at) || toMysqlUtcDateTime(null);
+
+  return {
+    clientSaleUid,
+    deviceId: sanitizeText(body.deviceId != null ? body.deviceId : body.device_id, 80),
+    paymentMethod: normalizePaymentMethod(body.paymentMethod != null ? body.paymentMethod : body.payment_method),
+    notes: sanitizeText(body.notes, 600),
+    items,
+    subtotal,
+    discountAmount,
+    taxAmount,
+    totalAmount: computedTotal,
+    receivedAmount,
+    changeAmount,
+    createdAtSql,
+  };
+}
+
+function hasTableColumn(tableKey, columnName) {
+  const set = POS_SCHEMA[tableKey];
+  if (!set || !(set instanceof Set)) return false;
+  return set.has(columnName);
+}
+
+function productImageSelectSql(alias) {
+  return hasTableColumn("products", "image_url") ? `${alias}.image_url AS image_url` : `NULL AS image_url`;
+}
+
+async function loadColumns(tableName) {
+  const [rows] = await pool.query(`SHOW COLUMNS FROM ${tableName}`);
+  return new Set((rows || []).map((r) => String(r.Field || "")));
+}
+
+async function refreshPosSchema() {
+  try {
+    POS_SCHEMA.sales = await loadColumns("sales");
+  } catch (_) {
+    POS_SCHEMA.sales = new Set();
+  }
+  try {
+    POS_SCHEMA.salesDetails = await loadColumns("sales_details");
+  } catch (_) {
+    POS_SCHEMA.salesDetails = new Set();
+  }
+  try {
+    POS_SCHEMA.products = await loadColumns("products");
+  } catch (_) {
+    POS_SCHEMA.products = new Set();
+  }
+}
+
+async function ensurePosSyncTable(conn) {
+  if (POS_SYNC_TABLE_READY) return;
+  await conn.query(
+    `CREATE TABLE IF NOT EXISTS pos_sales_sync (
+      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+      client_sale_uid VARCHAR(128) NOT NULL,
+      sale_id BIGINT UNSIGNED NULL,
+      user_id BIGINT UNSIGNED NULL,
+      device_id VARCHAR(80) NULL,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      UNIQUE KEY ux_pos_sales_sync_uid (client_sale_uid),
+      KEY idx_pos_sales_sync_sale_id (sale_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`
+  );
+  POS_SYNC_TABLE_READY = true;
+}
+
+async function reserveClientSaleUid(conn, sale, userId) {
+  if (!sale.clientSaleUid) return { duplicate: false, existingSaleId: null };
+  await ensurePosSyncTable(conn);
+  try {
+    await conn.query(
+      `INSERT INTO pos_sales_sync (client_sale_uid, sale_id, user_id, device_id, created_at)
+       VALUES (?, NULL, ?, ?, ?)`,
+      [sale.clientSaleUid, userId || null, sale.deviceId || null, sale.createdAtSql]
+    );
+    return { duplicate: false, existingSaleId: null };
+  } catch (err) {
+    if (err && err.code === "ER_DUP_ENTRY") {
+      const [rows] = await conn.query(
+        `SELECT sale_id FROM pos_sales_sync WHERE client_sale_uid = ? LIMIT 1`,
+        [sale.clientSaleUid]
+      );
+      const existing = rows && rows[0] ? rows[0].sale_id : null;
+      return { duplicate: true, existingSaleId: existing == null ? null : Number(existing) };
+    }
+    throw err;
+  }
+}
+
+async function attachSaleIdToUid(conn, sale, userId, saleId) {
+  if (!sale.clientSaleUid) return;
+  await conn.query(
+    `UPDATE pos_sales_sync
+     SET sale_id = COALESCE(sale_id, ?),
+         user_id = COALESCE(user_id, ?),
+         device_id = COALESCE(device_id, ?)
+     WHERE client_sale_uid = ?`,
+    [saleId, userId, sale.deviceId || null, sale.clientSaleUid]
+  );
+}
+
+function buildSqlInsert(tableName, cols) {
+  const c = cols.map((name) => `\`${name}\``).join(", ");
+  const p = cols.map(() => "?").join(", ");
+  return `INSERT INTO ${tableName} (${c}) VALUES (${p})`;
+}
+
+function buildSaleNotes(sale) {
+  const parts = [];
+  if (sale.notes) parts.push(sale.notes);
+  parts.push(
+    `POS pay=${sale.paymentMethod} subtotal=${sale.subtotal.toFixed(2)} discount=${sale.discountAmount.toFixed(2)} tax=${sale.taxAmount.toFixed(2)} total=${sale.totalAmount.toFixed(2)} received=${sale.receivedAmount.toFixed(2)} change=${sale.changeAmount.toFixed(2)} uid=${sale.clientSaleUid}`
+  );
+  if (sale.deviceId) parts.push(`device=${sale.deviceId}`);
+  return parts.join(" | ").slice(0, 1000);
+}
+
+async function insertPosSale(conn, userId, sale) {
+  const reservation = await reserveClientSaleUid(conn, sale, userId);
+  if (reservation.duplicate) {
+    if (reservation.existingSaleId == null) {
+      const err = new Error("Sale is already syncing, retry shortly");
+      err.statusCode = 409;
+      throw err;
+    }
+    return { status: "duplicate", saleId: reservation.existingSaleId };
+  }
+
+  const saleCols = [];
+  const saleVals = [];
+  if (hasTableColumn("sales", "total_amount")) {
+    saleCols.push("total_amount");
+    saleVals.push(sale.totalAmount);
+  }
+  if (hasTableColumn("sales", "notes")) {
+    saleCols.push("notes");
+    saleVals.push(buildSaleNotes(sale));
+  }
+  if (hasTableColumn("sales", "user_id")) {
+    saleCols.push("user_id");
+    saleVals.push(userId);
+  }
+  if (hasTableColumn("sales", "last_updated")) {
+    saleCols.push("last_updated");
+    saleVals.push(sale.createdAtSql);
+  }
+  if (hasTableColumn("sales", "created_at")) {
+    saleCols.push("created_at");
+    saleVals.push(sale.createdAtSql);
+  }
+  if (hasTableColumn("sales", "is_synced")) {
+    saleCols.push("is_synced");
+    saleVals.push(0);
+  }
+  if (!saleCols.length) {
+    const err = new Error("Unsupported sales schema");
+    err.statusCode = 500;
+    throw err;
+  }
+
+  const [saleRes] = await conn.query(buildSqlInsert("sales", saleCols), saleVals);
+  const saleId = Number(saleRes && saleRes.insertId ? saleRes.insertId : 0);
+  if (!saleId) {
+    const err = new Error("Could not create sale");
+    err.statusCode = 500;
+    throw err;
+  }
+
+  if (!hasTableColumn("salesDetails", "sale_id") || !hasTableColumn("salesDetails", "product_id")) {
+    const err = new Error("Unsupported sales_details schema");
+    err.statusCode = 500;
+    throw err;
+  }
+
+  for (const item of sale.items) {
+    const detailCols = ["sale_id", "product_id"];
+    const detailVals = [saleId, item.productId];
+    if (hasTableColumn("salesDetails", "quantity")) {
+      detailCols.push("quantity");
+      detailVals.push(item.quantity);
+    }
+    if (hasTableColumn("salesDetails", "price")) {
+      detailCols.push("price");
+      detailVals.push(item.unitPrice);
+    }
+    if (hasTableColumn("salesDetails", "total_price")) {
+      detailCols.push("total_price");
+      detailVals.push(item.totalPrice);
+    }
+    if (hasTableColumn("salesDetails", "last_updated")) {
+      detailCols.push("last_updated");
+      detailVals.push(sale.createdAtSql);
+    }
+    if (hasTableColumn("salesDetails", "created_at")) {
+      detailCols.push("created_at");
+      detailVals.push(sale.createdAtSql);
+    }
+    if (hasTableColumn("salesDetails", "is_synced")) {
+      detailCols.push("is_synced");
+      detailVals.push(0);
+    }
+    await conn.query(buildSqlInsert("sales_details", detailCols), detailVals);
+
+    if (hasTableColumn("products", "quantity")) {
+      const updates = [
+        "quantity = CASE WHEN quantity IS NULL THEN NULL ELSE GREATEST(0, quantity - ?) END",
+      ];
+      const values = [item.quantity];
+      if (hasTableColumn("products", "last_updated")) updates.push("last_updated = ?");
+      if (hasTableColumn("products", "last_updated")) values.push(sale.createdAtSql);
+      if (hasTableColumn("products", "is_synced")) updates.push("is_synced = 0");
+      values.push(item.productId);
+      await conn.query(`UPDATE products SET ${updates.join(", ")} WHERE id_product = ?`, values);
+    }
+  }
+
+  await attachSaleIdToUid(conn, sale, userId, saleId);
+  return { status: "created", saleId };
+}
+
+async function createPosSaleForUser(user, rawSale) {
+  const sale = normalizeSalePayload(rawSale);
+  const userId = Number(user && user.id_user);
+  if (!Number.isInteger(userId) || userId <= 0) {
+    const err = new Error("Unauthorized");
+    err.statusCode = 401;
+    throw err;
+  }
+
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+    const result = await insertPosSale(conn, userId, sale);
+    await conn.commit();
+    return {
+      status: result.status,
+      saleId: result.saleId,
+      clientSaleUid: sale.clientSaleUid,
+      totalAmount: sale.totalAmount,
+    };
+  } catch (e) {
+    await conn.rollback();
+    throw e;
+  } finally {
+    conn.release();
+  }
+}
+
 // Health check
 fastify.get(CFG.apiPrefix + "/health", async () => {
   return { ok: true };
@@ -367,6 +794,170 @@ fastify.get(
   },
   async (req) => {
     return { user: publicUser(req.cagUser) };
+  }
+);
+
+// ---- POS (OFFLINE-FIRST) ----
+fastify.get(
+  CFG.apiPrefix + "/pos/bootstrap",
+  {
+    preHandler: requireAuth,
+  },
+  async (req) => {
+    const limit = clampInt(req.query && req.query.limit, 1, 5000, 2500);
+    const category = normalizeCategory(req.query && req.query.category);
+    const imageSelect = productImageSelectSql("p");
+    const values = [];
+    const where = category ? "WHERE p.productType = ?" : "";
+    if (category) values.push(category);
+    values.push(limit);
+
+    const [rows] = await pool.query(
+      `SELECT
+         p.id_product,
+         p.barcode,
+         p.reference,
+         p.name,
+         p.description,
+         p.quantity,
+         p.purchasePrice,
+         p.price,
+         p.productType,
+         ${imageSelect},
+         p.last_updated
+       FROM products p
+       ${where}
+       ORDER BY p.name ASC
+       LIMIT ?`,
+      values
+    );
+
+    let offerRows = [];
+    try {
+      const [offers] = await pool.query(
+        `SELECT
+           o.id_offer,
+           o.name,
+           o.quantity,
+           o.price,
+           o.last_updated,
+           GROUP_CONCAT(op.product_id ORDER BY op.product_id) AS product_ids
+         FROM product_offers o
+         LEFT JOIN product_offers_products op ON op.offer_id = o.id_offer
+         GROUP BY o.id_offer
+         ORDER BY o.last_updated DESC
+         LIMIT 1000`
+      );
+      offerRows = offers || [];
+    } catch (_) {
+      // Keep bootstrap resilient if offers tables are unavailable.
+      offerRows = [];
+    }
+
+    return {
+      generatedAt: new Date().toISOString(),
+      category,
+      products: (rows || []).map((p) => ({
+        id_product: Number(p.id_product),
+        barcode: p.barcode || "",
+        reference: p.reference || "",
+        name: p.name || "",
+        description: p.description || "",
+        quantity: p.quantity == null ? null : Number(p.quantity),
+        purchasePrice: p.purchasePrice == null ? null : Number(p.purchasePrice),
+        price: p.price == null ? 0 : Number(p.price),
+        productType: p.productType || "",
+        image_url: typeof p.image_url === "string" ? p.image_url : "",
+        last_updated: p.last_updated || null,
+      })),
+      offers: (offerRows || []).map((o) => ({
+        id_offer: Number(o.id_offer),
+        name: o.name || "",
+        quantity: o.quantity == null ? null : Number(o.quantity),
+        price: o.price == null ? null : Number(o.price),
+        last_updated: o.last_updated || null,
+        productIds: o.product_ids
+          ? String(o.product_ids)
+              .split(",")
+              .map((x) => Number(x))
+              .filter((x) => Number.isFinite(x))
+          : [],
+      })),
+    };
+  }
+);
+
+fastify.post(
+  CFG.apiPrefix + "/pos/sales",
+  {
+    preHandler: requireAuth,
+  },
+  async (req, reply) => {
+    try {
+      const result = await createPosSaleForUser(req.cagUser, req.body || {});
+      reply.code(result.status === "created" ? 201 : 200).send({
+        ok: true,
+        status: result.status,
+        saleId: result.saleId,
+        clientSaleUid: result.clientSaleUid,
+        totalAmount: result.totalAmount,
+      });
+    } catch (e) {
+      const status = Number(e && e.statusCode) || 500;
+      return sendError(reply, status, status >= 500 ? "Could not create POS sale" : String(e.message || "Error"));
+    }
+  }
+);
+
+fastify.post(
+  CFG.apiPrefix + "/pos/sync",
+  {
+    preHandler: requireAuth,
+  },
+  async (req, reply) => {
+    const body = req.body || {};
+    const sales = Array.isArray(body.sales) ? body.sales : [];
+    if (!sales.length) return sendError(reply, 400, "Missing sales array");
+    if (sales.length > 100) return sendError(reply, 400, "Too many sales in one sync batch (max 100)");
+
+    const results = [];
+    for (let i = 0; i < sales.length; i += 1) {
+      const raw = sales[i] || {};
+      const clientSaleUid = sanitizeClientSaleUid(raw.clientSaleUid != null ? raw.clientSaleUid : raw.client_sale_uid);
+      try {
+        const r = await createPosSaleForUser(req.cagUser, raw);
+        results.push({
+          index: i,
+          clientSaleUid: r.clientSaleUid,
+          status: r.status,
+          saleId: r.saleId,
+          totalAmount: r.totalAmount,
+        });
+      } catch (e) {
+        const statusCode = Number(e && e.statusCode) || 500;
+        results.push({
+          index: i,
+          clientSaleUid,
+          status: "failed",
+          message: statusCode >= 500 ? "Server error" : String(e.message || "Error"),
+          statusCode,
+          retryable: statusCode >= 500 || statusCode === 409,
+        });
+      }
+    }
+
+    const okCount = results.filter((x) => x.status === "created" || x.status === "duplicate").length;
+    const failCount = results.length - okCount;
+
+    reply.send({
+      ok: failCount === 0,
+      summary: {
+        total: results.length,
+        synced: okCount,
+        failed: failCount,
+      },
+      results,
+    });
   }
 );
 
@@ -833,9 +1424,6 @@ fastify.get(
 // ---- PRODUCTS ----
 fastify.get(
   CFG.apiPrefix + "/products/categories",
-  {
-    preHandler: requireAuth,
-  },
   async () => {
     const [rows] = await pool.query(
       `SELECT DISTINCT TRIM(p.productType) AS name
@@ -858,6 +1446,7 @@ fastify.get(
   },
   async (req) => {
     const q = (req.query && typeof req.query.q === "string" ? req.query.q.trim() : "") || "";
+    const imageSelect = productImageSelectSql("p");
     const limit = clampInt(req.query && req.query.limit, 1, 100, 20);
     const offset = clampInt(req.query && req.query.offset, 0, 1_000_000, 0);
     const like = "%" + q + "%";
@@ -881,6 +1470,7 @@ fastify.get(
          p.purchasePrice,
          p.price,
          p.productType,
+         ${imageSelect},
          p.last_updated
        FROM products p
        WHERE (? = '' OR p.name LIKE ? OR p.barcode LIKE ? OR p.reference LIKE ? OR p.productType LIKE ?)
@@ -907,17 +1497,30 @@ fastify.post(
     const reference = typeof b.reference === "string" ? b.reference.trim() : "";
     const description = typeof b.description === "string" ? b.description : "";
     const productType = typeof b.productType === "string" ? b.productType.trim() : "";
-    const quantity = b.quantity == null ? null : Number(b.quantity);
-    const purchasePrice = b.purchasePrice == null ? null : Number(b.purchasePrice);
-    const price = b.price == null ? null : Number(b.price);
+    const quantity = b.quantity == null || b.quantity === "" ? null : Number(b.quantity);
+    const purchasePrice = b.purchasePrice == null || b.purchasePrice === "" ? null : Number(b.purchasePrice);
+    const price = b.price == null || b.price === "" ? null : Number(b.price);
+    if (b.quantity != null && b.quantity !== "" && !Number.isFinite(quantity)) return sendError(reply, 400, "Invalid quantity");
+    if (b.purchasePrice != null && b.purchasePrice !== "" && !Number.isFinite(purchasePrice)) return sendError(reply, 400, "Invalid purchasePrice");
+    if (b.price != null && b.price !== "" && !Number.isFinite(price)) return sendError(reply, 400, "Invalid price");
+    const imageUrl = sanitizeImageUrl(b.imageUrl != null ? b.imageUrl : b.image_url);
+    const hasImageColumn = hasTableColumn("products", "image_url");
 
-    const [res] = await pool.query(
-      `INSERT INTO products
-         (barcode, reference, name, description, quantity, purchasePrice, price, productType, last_updated, is_synced)
-       VALUES
-         (?, ?, ?, ?, ?, ?, ?, ?, NOW(), 0)`,
-      [barcode, reference, name, description, quantity, purchasePrice, price, productType]
-    );
+    const [res] = hasImageColumn
+      ? await pool.query(
+          `INSERT INTO products
+             (barcode, reference, name, description, quantity, purchasePrice, price, productType, image_url, last_updated, is_synced)
+           VALUES
+             (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), 0)`,
+          [barcode, reference, name, description, quantity, purchasePrice, price, productType, imageUrl]
+        )
+      : await pool.query(
+          `INSERT INTO products
+             (barcode, reference, name, description, quantity, purchasePrice, price, productType, last_updated, is_synced)
+           VALUES
+             (?, ?, ?, ?, ?, ?, ?, ?, NOW(), 0)`,
+          [barcode, reference, name, description, quantity, purchasePrice, price, productType]
+        );
 
     reply.code(201).send({ id_product: res.insertId });
   }
@@ -947,9 +1550,25 @@ fastify.patch(
     if (typeof b.reference === "string") setField("reference", b.reference.trim());
     if (typeof b.description === "string") setField("description", b.description);
     if (typeof b.productType === "string") setField("productType", b.productType.trim());
-    if (b.quantity !== undefined) setField("quantity", b.quantity == null ? null : Number(b.quantity));
-    if (b.purchasePrice !== undefined) setField("purchasePrice", b.purchasePrice == null ? null : Number(b.purchasePrice));
-    if (b.price !== undefined) setField("price", b.price == null ? null : Number(b.price));
+    if ((b.imageUrl !== undefined || b.image_url !== undefined) && hasTableColumn("products", "image_url")) {
+      const imageVal = b.imageUrl !== undefined ? b.imageUrl : b.image_url;
+      setField("image_url", sanitizeImageUrl(imageVal));
+    }
+    if (b.quantity !== undefined) {
+      const quantity = b.quantity == null || b.quantity === "" ? null : Number(b.quantity);
+      if (b.quantity != null && b.quantity !== "" && !Number.isFinite(quantity)) return sendError(reply, 400, "Invalid quantity");
+      setField("quantity", quantity);
+    }
+    if (b.purchasePrice !== undefined) {
+      const purchasePrice = b.purchasePrice == null || b.purchasePrice === "" ? null : Number(b.purchasePrice);
+      if (b.purchasePrice != null && b.purchasePrice !== "" && !Number.isFinite(purchasePrice)) return sendError(reply, 400, "Invalid purchasePrice");
+      setField("purchasePrice", purchasePrice);
+    }
+    if (b.price !== undefined) {
+      const price = b.price == null || b.price === "" ? null : Number(b.price);
+      if (b.price != null && b.price !== "" && !Number.isFinite(price)) return sendError(reply, 400, "Invalid price");
+      setField("price", price);
+    }
 
     if (!fields.length) return sendError(reply, 400, "No fields to update");
 
@@ -1186,6 +1805,15 @@ async function main() {
     HAS_PASSWORD_HASH_COLUMN = false;
     fastify.log.warn({ err: e }, "Schema detection failed (password_hash disabled)");
   }
+  await refreshPosSchema();
+  fastify.log.info(
+    {
+      salesColumns: POS_SCHEMA.sales.size,
+      salesDetailColumns: POS_SCHEMA.salesDetails.size,
+      productColumns: POS_SCHEMA.products.size,
+    },
+    "POS schema cache"
+  );
   await fastify.listen({ port: CFG.port, host: CFG.host });
 }
 
