@@ -32,7 +32,7 @@
 (function () {
   "use strict";
 
-  var APP_VERSION = "1.0.0";
+  var APP_VERSION = "1.0.4";
   var ROOT_SELECTOR = '[data-cag="pos-dashboard"]';
 
   function $(sel, root) {
@@ -209,6 +209,7 @@
     var epProducts = (root.getAttribute("data-ep-products") || "/products").trim();
     var epProductCategories = (root.getAttribute("data-ep-product-categories") || "/products/categories").trim();
     var epOffers = (root.getAttribute("data-ep-offers") || "/offers").trim();
+    var requestTimeoutMs = parseInt(root.getAttribute("data-request-timeout-ms") || "15000", 10);
 
     return {
       apiBase: apiBase.replace(/\/+$/, ""),
@@ -230,6 +231,7 @@
       epProducts: epProducts,
       epProductCategories: epProductCategories,
       epOffers: epOffers,
+      requestTimeoutMs: Number.isFinite(requestTimeoutMs) ? clamp(requestTimeoutMs, 5000, 60000) : 15000,
     };
   }
 
@@ -482,11 +484,34 @@
     var auth = readAuth(cfg);
     if (auth && auth.token) headers.Authorization = "Bearer " + auth.token;
 
-    var res = await fetch(url, {
-      method: opts.method || "GET",
-      headers: headers,
-      body: opts.json !== undefined ? JSON.stringify(opts.json) : undefined,
-    });
+    var timeoutMs = cfg && Number.isFinite(Number(cfg.requestTimeoutMs)) ? Number(cfg.requestTimeoutMs) : 15000;
+    var ctrl = typeof AbortController !== "undefined" ? new AbortController() : null;
+    var timer = null;
+    if (ctrl) {
+      timer = window.setTimeout(function () {
+        ctrl.abort();
+      }, timeoutMs);
+    }
+
+    var res;
+    try {
+      res = await fetch(url, {
+        method: opts.method || "GET",
+        headers: headers,
+        body: opts.json !== undefined ? JSON.stringify(opts.json) : undefined,
+        signal: ctrl ? ctrl.signal : undefined,
+      });
+    } catch (fetchErr) {
+      if (fetchErr && fetchErr.name === "AbortError") {
+        var timeoutErr = new Error("Timeout API (" + timeoutMs + "ms) sur " + (opts.method || "GET") + " " + path);
+        timeoutErr.status = 408;
+        timeoutErr.data = { url: url };
+        throw timeoutErr;
+      }
+      throw fetchErr;
+    } finally {
+      if (timer) window.clearTimeout(timer);
+    }
 
     var text = await res.text();
     var data = null;
@@ -1112,8 +1137,10 @@
     try {
       return await apiFetch(cfg, path, { method: "PATCH", json: payload });
     } catch (err) {
-      // Some reverse proxies block PATCH. Fallback to PUT for compatibility.
-      if (err && (err.status === 404 || err.status === 405 || err.status === 501)) {
+      // Some reverse proxies block or hang on PATCH. Fallback to PUT for compatibility.
+      var status = err && err.status;
+      var shouldTryPut = status === 0 || status === 408 || status === 404 || status === 405 || status === 500 || status === 501 || status === 502 || status === 503 || status === 504;
+      if (shouldTryPut) {
         return apiFetch(cfg, path, { method: "PUT", json: payload });
       }
       throw err;
@@ -2377,6 +2404,7 @@
   async function mount(root) {
     if (!root || root.getAttribute("data-cag-mounted") === "1") return;
     root.setAttribute("data-cag-mounted", "1");
+    root.setAttribute("data-cag-version", APP_VERSION);
 
     var cfg = readConfig(root);
     var shell = renderAppChrome(root, cfg);
@@ -2439,6 +2467,9 @@
   }
 
   function boot() {
+    if (window && window.console && typeof window.console.info === "function") {
+      window.console.info("[CAG] dashboard.js version", APP_VERSION);
+    }
     var roots = $all(ROOT_SELECTOR);
     roots.forEach(function (root) {
       mount(root);
