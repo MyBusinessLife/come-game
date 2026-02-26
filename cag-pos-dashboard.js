@@ -2002,8 +2002,11 @@
           el("div", { class: "cag-field" }, el("label", { text: "Prix de vente" }), fSell),
           el("div", { class: "cag-field cag-field-full" }, el("label", { text: "Description" }), fDesc)
         );
+        var productFormId = "cag-product-form-" + Date.now() + "-" + Math.floor(Math.random() * 100000);
+        form.setAttribute("id", productFormId);
 
         var saveBtn = el("button", { class: "cag-btn cag-btn-primary", type: "submit", text: isEdit ? "Enregistrer" : "Créer" });
+        saveBtn.setAttribute("form", productFormId);
         var cancelBtn = el("button", { class: "cag-btn", type: "button", text: "Annuler" });
 
         var actions = el("div", { class: "cag-form-actions" }, cancelBtn, saveBtn);
@@ -2245,8 +2248,11 @@
           el("div", { class: "cag-field" }, el("label", { text: "Prix" }), fPrice),
           el("div", { class: "cag-field cag-field-full" }, el("label", { text: "Produits inclus" }), prodSearch, multi)
         );
+        var offerFormId = "cag-offer-form-" + Date.now() + "-" + Math.floor(Math.random() * 100000);
+        form.setAttribute("id", offerFormId);
 
         var saveBtn = el("button", { class: "cag-btn cag-btn-primary", type: "submit", text: isEdit ? "Enregistrer" : "Créer" });
+        saveBtn.setAttribute("form", offerFormId);
         var cancelBtn = el("button", { class: "cag-btn", type: "button", text: "Annuler" });
         var actions = el("div", { class: "cag-form-actions" }, cancelBtn, saveBtn);
 
