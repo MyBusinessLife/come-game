@@ -172,6 +172,15 @@
     return Number.isFinite(n) ? n : null;
   }
 
+  function parseInputNumber(v) {
+    var s = String(v == null ? "" : v).trim();
+    if (!s) return undefined;
+    var normalized = s.replace(",", ".");
+    var n = Number(normalized);
+    if (!Number.isFinite(n)) return null;
+    return n;
+  }
+
   function readConfig(root) {
     var apiBase = (root.getAttribute("data-api-base") || "").trim();
     var page = (root.getAttribute("data-page") || "dashboard").trim();
@@ -1175,6 +1184,7 @@
         uniq.sort(function (a, b) {
           return a.localeCompare(b, cfg.locale || "fr", { sensitivity: "base" });
         });
+        state.categoryOptions = uniq.slice();
 
         chrome.categorySelect.innerHTML = "";
         chrome.categorySelect.appendChild(el("option", { value: "", text: "Toutes catégories" }));
@@ -1184,6 +1194,7 @@
         chrome.categorySelect.value = state.category || "";
       } catch (_) {
         // Keep default option only.
+        state.categoryOptions = [];
         chrome.categorySelect.innerHTML = "";
         chrome.categorySelect.appendChild(el("option", { value: "", text: "Toutes catégories" }));
         chrome.categorySelect.value = "";
@@ -1915,7 +1926,51 @@
       function openProductModal(product) {
         var isEdit = !!product;
         var fName = el("input", { class: "cag-input", type: "text", value: (product && product.name) || "", required: true });
-        var fType = el("input", { class: "cag-input", type: "text", value: (product && product.productType) || "" });
+        var currentType = (product && product.productType ? String(product.productType) : "").trim();
+        var TYPE_CUSTOM = "__custom__";
+        var knownTypes = Array.isArray(state.categoryOptions) ? state.categoryOptions.slice() : [];
+        var seenTypes = Object.create(null);
+        knownTypes = knownTypes
+          .map(function (v) {
+            return String(v || "").trim();
+          })
+          .filter(function (v) {
+            if (!v) return false;
+            var k = v.toLowerCase();
+            if (seenTypes[k]) return false;
+            seenTypes[k] = true;
+            return true;
+          })
+          .sort(function (a, b) {
+            return a.localeCompare(b, cfg.locale || "fr", { sensitivity: "base" });
+          });
+        var hasCurrentType = !!currentType && knownTypes.some(function (v) { return v.toLowerCase() === currentType.toLowerCase(); });
+
+        var fTypeSelect = el("select", { class: "cag-select" });
+        fTypeSelect.appendChild(el("option", { value: "", text: "Sans catégorie" }));
+        knownTypes.forEach(function (cat) {
+          fTypeSelect.appendChild(el("option", { value: cat, text: cat }));
+        });
+        fTypeSelect.appendChild(el("option", { value: TYPE_CUSTOM, text: "Autre..." }));
+
+        var useCustomType = !!currentType && !hasCurrentType;
+        fTypeSelect.value = useCustomType ? TYPE_CUSTOM : currentType;
+
+        var fTypeCustom = el("input", {
+          class: "cag-input",
+          type: "text",
+          placeholder: "Nouvelle catégorie",
+          value: useCustomType ? currentType : "",
+        });
+
+        function syncTypeCustomInput() {
+          var show = fTypeSelect.value === TYPE_CUSTOM;
+          fTypeCustom.style.display = show ? "" : "none";
+          if (!show) fTypeCustom.value = "";
+        }
+        syncTypeCustomInput();
+        fTypeSelect.addEventListener("change", syncTypeCustomInput);
+
         var fBarcode = el("input", { class: "cag-input", type: "text", value: (product && product.barcode) || "" });
         var fRef = el("input", { class: "cag-input", type: "text", value: (product && product.reference) || "" });
         var fQty = el("input", { class: "cag-input", type: "number", step: "1", value: product && product.quantity != null ? String(product.quantity) : "" });
@@ -1927,7 +1982,7 @@
           "form",
           { class: "cag-form" },
           el("div", { class: "cag-field cag-field-full" }, el("label", { text: "Nom" }), fName),
-          el("div", { class: "cag-field" }, el("label", { text: "Type" }), fType),
+          el("div", { class: "cag-field" }, el("label", { text: "Catégorie" }), fTypeSelect, fTypeCustom),
           el("div", { class: "cag-field" }, el("label", { text: "Code barre" }), fBarcode),
           el("div", { class: "cag-field" }, el("label", { text: "Référence" }), fRef),
           el("div", { class: "cag-field" }, el("label", { text: "Stock" }), fQty),
@@ -1949,17 +2004,34 @@
           (async function () {
             setBusy(saveBtn, true, "Sauvegarde...");
             try {
+              function parseNumberField(rawValue, fieldLabel) {
+                var parsed = parseInputNumber(rawValue);
+                if (parsed === null) throw new Error(fieldLabel + " invalide");
+                return parsed;
+              }
+              var typeValue = fTypeSelect.value === TYPE_CUSTOM ? fTypeCustom.value.trim() : fTypeSelect.value.trim();
+              var qtyVal = parseNumberField(fQty.value, "Stock");
+              var buyVal = parseNumberField(fBuy.value, "Prix d'achat");
+              var sellVal = parseNumberField(fSell.value, "Prix de vente");
+
               var payload = {
                 name: fName.value.trim(),
-                productType: fType.value.trim(),
+                productType: typeValue,
                 barcode: fBarcode.value.trim(),
                 reference: fRef.value.trim(),
-                quantity: toNumber(fQty.value),
-                purchasePrice: toNumber(fBuy.value),
-                price: toNumber(fSell.value),
                 description: fDesc.value,
               };
               if (!payload.name) throw new Error("Nom requis");
+
+              if (isEdit) {
+                if (qtyVal !== undefined) payload.quantity = qtyVal;
+                if (buyVal !== undefined) payload.purchasePrice = buyVal;
+                if (sellVal !== undefined) payload.price = sellVal;
+              } else {
+                payload.quantity = qtyVal === undefined ? null : qtyVal;
+                payload.purchasePrice = buyVal === undefined ? null : buyVal;
+                payload.price = sellVal === undefined ? null : sellVal;
+              }
 
               if (isEdit) await updateProduct(cfg, product.id, payload);
               else await createProduct(cfg, payload);
@@ -2311,6 +2383,7 @@
       user: user,
       range: { from: from, to: to },
       category: "",
+      categoryOptions: [],
       view: "overview",
       kpis: { revenue: null, profit: null, salesCount: null, avgTicket: null },
       series: [],
