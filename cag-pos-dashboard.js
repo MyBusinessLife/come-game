@@ -1045,7 +1045,7 @@
       tbody.appendChild(tr);
     });
     t.appendChild(tbody);
-    return t;
+    return el("div", { class: "cag-scroll-x" }, t);
   }
 
   function paginate(stateSlice, total) {
@@ -1108,7 +1108,16 @@
   }
 
   async function updateProduct(cfg, id, payload) {
-    return apiFetch(cfg, cfg.epProducts + "/" + encodeURIComponent(String(id)), { method: "PATCH", json: payload });
+    var path = cfg.epProducts + "/" + encodeURIComponent(String(id));
+    try {
+      return await apiFetch(cfg, path, { method: "PATCH", json: payload });
+    } catch (err) {
+      // Some reverse proxies block PATCH. Fallback to PUT for compatibility.
+      if (err && (err.status === 404 || err.status === 405 || err.status === 501)) {
+        return apiFetch(cfg, path, { method: "PUT", json: payload });
+      }
+      throw err;
+    }
   }
 
   async function deleteProduct(cfg, id) {
@@ -1711,6 +1720,9 @@
           // Replace loading
           var empty = $(".cag-empty", box);
           if (empty) empty.parentNode.removeChild(empty);
+          $all(".cag-scroll-x, .cag-footer-row", box).forEach(function (n) {
+            if (n && n.parentNode) n.parentNode.removeChild(n);
+          });
           box.appendChild(t);
           box.appendChild(footer);
         } catch (err) {
@@ -1873,7 +1885,7 @@
           if (empty) empty.parentNode.removeChild(empty);
 
           // Remove existing table/footer before appending again
-          $all("table.cag-table, .cag-footer-row", box).forEach(function (n) {
+          $all(".cag-scroll-x, .cag-footer-row", box).forEach(function (n) {
             if (n && n.parentNode) n.parentNode.removeChild(n);
           });
 
@@ -2014,20 +2026,35 @@
               var buyVal = parseNumberField(fBuy.value, "Prix d'achat");
               var sellVal = parseNumberField(fSell.value, "Prix de vente");
 
-              var payload = {
-                name: fName.value.trim(),
-                productType: typeValue,
-                barcode: fBarcode.value.trim(),
-                reference: fRef.value.trim(),
-                description: fDesc.value,
-              };
-              if (!payload.name) throw new Error("Nom requis");
+              if (isEdit && (product == null || product.id == null)) throw new Error("Produit invalide (id manquant)");
+              var nameValue = fName.value.trim();
+              if (!nameValue) throw new Error("Nom requis");
 
+              var payload;
               if (isEdit) {
-                if (qtyVal !== undefined) payload.quantity = qtyVal;
-                if (buyVal !== undefined) payload.purchasePrice = buyVal;
-                if (sellVal !== undefined) payload.price = sellVal;
+                payload = {};
+                if (nameValue !== (product.name || "")) payload.name = nameValue;
+                if (typeValue !== (product.productType || "")) payload.productType = typeValue;
+                if (fBarcode.value.trim() !== (product.barcode || "")) payload.barcode = fBarcode.value.trim();
+                if (fRef.value.trim() !== (product.reference || "")) payload.reference = fRef.value.trim();
+                if (String(fDesc.value || "") !== String(product.description || "")) payload.description = fDesc.value;
+
+                if (qtyVal !== undefined && qtyVal !== product.quantity) payload.quantity = qtyVal;
+                if (buyVal !== undefined && buyVal !== product.purchasePrice) payload.purchasePrice = buyVal;
+                if (sellVal !== undefined && sellVal !== product.price) payload.price = sellVal;
+
+                if (!Object.keys(payload).length) {
+                  toast(root, "Aucune modification détectée.", "warn");
+                  return;
+                }
               } else {
+                payload = {
+                  name: nameValue,
+                  productType: typeValue,
+                  barcode: fBarcode.value.trim(),
+                  reference: fRef.value.trim(),
+                  description: fDesc.value,
+                };
                 payload.quantity = qtyVal === undefined ? null : qtyVal;
                 payload.purchasePrice = buyVal === undefined ? null : buyVal;
                 payload.price = sellVal === undefined ? null : sellVal;
@@ -2040,7 +2067,10 @@
               modal.close();
               run();
             } catch (err) {
-              toast(root, (err && err.message) || "Erreur sauvegarde produit", "err", 5200);
+              var msg = (err && err.message) || "Erreur sauvegarde produit";
+              if (err && err.status) msg += " (HTTP " + err.status + ")";
+              if (err && err.data && err.data.hint) msg += " - " + err.data.hint;
+              toast(root, msg, "err", 5200);
             } finally {
               setBusy(saveBtn, false, isEdit ? "Enregistrer" : "Créer");
             }
@@ -2139,7 +2169,7 @@
           var empty = $(".cag-empty", box);
           if (empty) empty.parentNode.removeChild(empty);
 
-          $all("table.cag-table, .cag-footer-row", box).forEach(function (n) {
+          $all(".cag-scroll-x, .cag-footer-row", box).forEach(function (n) {
             if (n && n.parentNode) n.parentNode.removeChild(n);
           });
 
