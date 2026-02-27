@@ -101,6 +101,35 @@ const pool = mysql.createPool({
   decimalNumbers: true,
 });
 
+function getConnectionWithTimeout(ms) {
+  const waitMs = Number.isFinite(Number(ms)) ? Math.max(500, Number(ms)) : 4000;
+  return new Promise((resolve, reject) => {
+    let done = false;
+    const timer = setTimeout(() => {
+      done = true;
+      const err = new Error(`DB pool acquire timeout (${waitMs}ms)`);
+      err.code = "DB_POOL_TIMEOUT";
+      reject(err);
+    }, waitMs);
+
+    pool
+      .getConnection()
+      .then((conn) => {
+        if (done) {
+          conn.release();
+          return;
+        }
+        clearTimeout(timer);
+        resolve(conn);
+      })
+      .catch((err) => {
+        if (done) return;
+        clearTimeout(timer);
+        reject(err);
+      });
+  });
+}
+
 fastify.decorate("db", pool);
 
 let HAS_PASSWORD_HASH_COLUMN = false;
@@ -113,6 +142,9 @@ const POS_SCHEMA = {
 
 fastify.register(helmet, {
   global: true,
+  // Dashboard assets are loaded from Webflow on another origin.
+  // `same-origin` can block JS/CSS loading in modern browsers.
+  crossOriginResourcePolicy: { policy: "cross-origin" },
 });
 
 fastify.register(cors, {
@@ -1571,9 +1603,34 @@ const updateProductHandler = async (req, reply) => {
     fields.push("is_synced = 0");
     values.push(id);
 
-    const [res] = await pool.query(`UPDATE products SET ${fields.join(", ")} WHERE id_product = ?`, values);
-    if (!res.affectedRows) return sendError(reply, 404, "Not found");
-    reply.send({ ok: true });
+    const conn = await getConnectionWithTimeout(4000);
+    try {
+      // Fail fast instead of hanging when another transaction keeps a row lock.
+      await conn.query("SET SESSION innodb_lock_wait_timeout = 5");
+      const [res] = await conn.query(
+        {
+          sql: `UPDATE products SET ${fields.join(", ")} WHERE id_product = ?`,
+          timeout: 8000,
+        },
+        values
+      );
+      if (!res.affectedRows) return sendError(reply, 404, "Not found");
+      reply.send({ ok: true });
+    } catch (e) {
+      if (e && e.code === "DB_POOL_TIMEOUT") {
+        return sendError(reply, 503, "Database busy", {
+          hint: "Trop de requetes simultanees. Reessaye dans quelques secondes.",
+        });
+      }
+      if (e && (e.code === "ER_LOCK_WAIT_TIMEOUT" || e.code === "PROTOCOL_SEQUENCE_TIMEOUT")) {
+        return sendError(reply, 503, "Product update timeout (row locked)", {
+          hint: "Close other POS sessions editing the same product, then retry.",
+        });
+      }
+      throw e;
+    } finally {
+      conn.release();
+    }
   };
 
 fastify.patch(
