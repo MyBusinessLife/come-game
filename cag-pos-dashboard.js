@@ -32,7 +32,7 @@
 (function () {
   "use strict";
 
-  var APP_VERSION = "1.0.4";
+  var APP_VERSION = "1.0.5";
   var ROOT_SELECTOR = '[data-cag="pos-dashboard"]';
 
   function $(sel, root) {
@@ -75,6 +75,12 @@
     } catch (_) {
       return null;
     }
+  }
+
+  function delay(ms) {
+    return new Promise(function (resolve) {
+      window.setTimeout(resolve, ms);
+    });
   }
 
   function escapeHtml(s) {
@@ -210,6 +216,7 @@
     var epProductCategories = (root.getAttribute("data-ep-product-categories") || "/products/categories").trim();
     var epOffers = (root.getAttribute("data-ep-offers") || "/offers").trim();
     var requestTimeoutMs = parseInt(root.getAttribute("data-request-timeout-ms") || "15000", 10);
+    var writeRequestTimeoutMs = parseInt(root.getAttribute("data-write-timeout-ms") || "45000", 10);
 
     return {
       apiBase: apiBase.replace(/\/+$/, ""),
@@ -231,7 +238,8 @@
       epProducts: epProducts,
       epProductCategories: epProductCategories,
       epOffers: epOffers,
-      requestTimeoutMs: Number.isFinite(requestTimeoutMs) ? clamp(requestTimeoutMs, 5000, 60000) : 15000,
+      requestTimeoutMs: Number.isFinite(requestTimeoutMs) ? clamp(requestTimeoutMs, 5000, 120000) : 15000,
+      writeRequestTimeoutMs: Number.isFinite(writeRequestTimeoutMs) ? clamp(writeRequestTimeoutMs, 10000, 180000) : 45000,
     };
   }
 
@@ -484,26 +492,37 @@
     var auth = readAuth(cfg);
     if (auth && auth.token) headers.Authorization = "Bearer " + auth.token;
 
-    var timeoutMs = cfg && Number.isFinite(Number(cfg.requestTimeoutMs)) ? Number(cfg.requestTimeoutMs) : 15000;
+    var method = String(opts.method || "GET").toUpperCase();
+    var baseTimeoutMs = cfg && Number.isFinite(Number(cfg.requestTimeoutMs)) ? Number(cfg.requestTimeoutMs) : 15000;
+    var writeTimeoutMs = cfg && Number.isFinite(Number(cfg.writeRequestTimeoutMs)) ? Number(cfg.writeRequestTimeoutMs) : 45000;
+    var isWriteMethod = method === "POST" || method === "PUT" || method === "PATCH" || method === "DELETE";
+    var timeoutMs = isWriteMethod ? Math.max(baseTimeoutMs, writeTimeoutMs) : baseTimeoutMs;
     var ctrl = typeof AbortController !== "undefined" ? new AbortController() : null;
     var timer = null;
-    if (ctrl) {
-      timer = window.setTimeout(function () {
-        ctrl.abort();
-      }, timeoutMs);
-    }
 
-    var res;
-    try {
-      res = await fetch(url, {
-        method: opts.method || "GET",
+    var fetchPromise = fetch(url, {
+        method: method,
         headers: headers,
         body: opts.json !== undefined ? JSON.stringify(opts.json) : undefined,
         signal: ctrl ? ctrl.signal : undefined,
       });
+
+    var timeoutPromise = new Promise(function (_resolve, reject) {
+      timer = window.setTimeout(function () {
+        if (ctrl) ctrl.abort();
+        var timeoutErr = new Error("Timeout API (" + timeoutMs + "ms) sur " + method + " " + path);
+        timeoutErr.status = 408;
+        timeoutErr.data = { url: url };
+        reject(timeoutErr);
+      }, timeoutMs);
+    });
+
+    var res;
+    try {
+      res = await Promise.race([fetchPromise, timeoutPromise]);
     } catch (fetchErr) {
       if (fetchErr && fetchErr.name === "AbortError") {
-        var timeoutErr = new Error("Timeout API (" + timeoutMs + "ms) sur " + (opts.method || "GET") + " " + path);
+        var timeoutErr = new Error("Timeout API (" + timeoutMs + "ms) sur " + method + " " + path);
         timeoutErr.status = 408;
         timeoutErr.data = { url: url };
         throw timeoutErr;
@@ -1134,16 +1153,30 @@
 
   async function updateProduct(cfg, id, payload) {
     var path = cfg.epProducts + "/" + encodeURIComponent(String(id));
+    var lastErr = null;
+
+    for (var i = 0; i < 2; i++) {
+      try {
+        return await apiFetch(cfg, path, { method: "PUT", json: payload });
+      } catch (errPut) {
+        lastErr = errPut;
+        var s = errPut && errPut.status;
+        var isTransient = s === 408 || s === 429 || s === 500 || s === 502 || s === 503 || s === 504;
+        var isMethodCompat = s === 404 || s === 405 || s === 501;
+
+        if (isMethodCompat) break;
+        if (isTransient && i === 0) {
+          await delay(700);
+          continue;
+        }
+        throw errPut;
+      }
+    }
+
     try {
       return await apiFetch(cfg, path, { method: "PATCH", json: payload });
-    } catch (err) {
-      // Some reverse proxies block or hang on PATCH. Fallback to PUT for compatibility.
-      var status = err && err.status;
-      var shouldTryPut = status === 0 || status === 408 || status === 404 || status === 405 || status === 500 || status === 501 || status === 502 || status === 503 || status === 504;
-      if (shouldTryPut) {
-        return apiFetch(cfg, path, { method: "PUT", json: payload });
-      }
-      throw err;
+    } catch (errPatch) {
+      throw errPatch || lastErr;
     }
   }
 
@@ -2088,6 +2121,10 @@
                 payload.quantity = qtyVal === undefined ? null : qtyVal;
                 payload.purchasePrice = buyVal === undefined ? null : buyVal;
                 payload.price = sellVal === undefined ? null : sellVal;
+              }
+
+              if (window && window.console && typeof window.console.debug === "function") {
+                window.console.debug("[CAG] save product", { id: isEdit ? product.id : null, payload: payload });
               }
 
               if (isEdit) await updateProduct(cfg, product.id, payload);
