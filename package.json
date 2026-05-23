@@ -4,7 +4,7 @@
   "private": true,
   "type": "commonjs",
   "main": "server.js",
-  "engines": { "node": ">=18" },
+  "engines": { "node": ">=20" },
   "scripts": { "start": "node server.js" },
   "dependencies": {
     "fastify": "^5.0.0",
@@ -12,6 +12,7 @@
     "@fastify/helmet": "^13.0.0",
     "dotenv": "^16.4.5",
     "mysql2": "^3.10.2",
+    "qrcode": "^1.5.4",
     "jsonwebtoken": "^9.0.2",
     "bcryptjs": "^2.4.3"
   }

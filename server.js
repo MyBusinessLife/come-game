@@ -28,6 +28,7 @@ const mysql = require("mysql2/promise");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const crypto = require("crypto");
+const QRCode = require("qrcode");
 
 function env(name, fallback) {
   const v = process.env[name];
@@ -60,6 +61,7 @@ const CFG = {
   apiPrefix: env("API_PREFIX", "/api").replace(/\/+$/, ""),
   jwtSecret: env("JWT_SECRET", ""),
   jwtExpires: env("JWT_EXPIRES", "12h"),
+  publicBaseUrl: env("PUBLIC_BASE_URL", "https://cag.mybusinesslife.fr").replace(/\/+$/, ""),
   migratePlaintextPasswords: envBool("MIGRATE_PLAINTEXT_PASSWORDS", false),
   migratePlaintextPasswordsOverwrite: envBool("MIGRATE_PLAINTEXT_PASSWORDS_OVERWRITE", false),
   businessDayStartHour: clampHour(env("BUSINESS_DAY_START_HOUR", "12"), 12),
@@ -134,6 +136,7 @@ fastify.decorate("db", pool);
 
 let HAS_PASSWORD_HASH_COLUMN = false;
 let POS_SYNC_TABLE_READY = false;
+let LINK_PAGES_TABLE_READY = false;
 const POS_SCHEMA = {
   sales: new Set(),
   salesDetails: new Set(),
@@ -437,12 +440,163 @@ function sanitizeText(v, maxLen) {
   return s.slice(0, maxLen);
 }
 
+function sanitizeNullableText(v, maxLen) {
+  const s = sanitizeText(v, maxLen);
+  return s || null;
+}
+
+function escapeHtml(s) {
+  return String(s == null ? "" : s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
 function sanitizeImageUrl(v) {
   if (v == null) return null;
   if (typeof v !== "string") return null;
   const s = v.trim();
   if (!s) return null;
   return s.slice(0, 1024);
+}
+
+function slugify(value) {
+  const base = String(value || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/&/g, " et ")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 80);
+  return base || "page-clients";
+}
+
+function sanitizeSlug(value) {
+  const raw = sanitizeText(value, 96).toLowerCase();
+  if (!raw) return "";
+  return slugify(raw).slice(0, 96);
+}
+
+function sanitizeEmail(value) {
+  const email = sanitizeText(value, 254);
+  if (!email) return null;
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    const err = new Error("Invalid email");
+    err.statusCode = 400;
+    throw err;
+  }
+  return email;
+}
+
+function sanitizePhone(value) {
+  const phone = sanitizeText(value, 64);
+  if (!phone) return null;
+  if (!/^[0-9+().\s-]{6,64}$/.test(phone)) {
+    const err = new Error("Invalid phone");
+    err.statusCode = 400;
+    throw err;
+  }
+  return phone;
+}
+
+function normalizeHttpUrl(value) {
+  const raw = sanitizeText(value, 1024);
+  if (!raw) return "";
+  const candidate = /^[a-z][a-z0-9+.-]*:/i.test(raw) ? raw : `https://${raw}`;
+  let parsed;
+  try {
+    parsed = new URL(candidate);
+  } catch (_) {
+    const err = new Error("Invalid URL");
+    err.statusCode = 400;
+    throw err;
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    const err = new Error("Invalid URL protocol");
+    err.statusCode = 400;
+    throw err;
+  }
+  return parsed.toString().slice(0, 1024);
+}
+
+function normalizeSocialLinks(rawLinks) {
+  if (!Array.isArray(rawLinks)) return [];
+  const out = [];
+  for (const raw of rawLinks.slice(0, 20)) {
+    const item = raw || {};
+    const url = normalizeHttpUrl(item.url);
+    if (!url) continue;
+    const kind = sanitizeText(item.kind, 32).toLowerCase() || "custom";
+    const label = sanitizeText(item.label, 80) || linkKindLabel(kind);
+    out.push({
+      kind,
+      label,
+      url,
+    });
+  }
+  return out;
+}
+
+function linkKindLabel(kind) {
+  const map = {
+    website: "Site web",
+    instagram: "Instagram",
+    facebook: "Facebook",
+    tiktok: "TikTok",
+    youtube: "YouTube",
+    linkedin: "LinkedIn",
+    x: "X",
+    twitter: "X",
+    snapchat: "Snapchat",
+    whatsapp: "WhatsApp",
+    google: "Google",
+    reviews: "Avis Google",
+    maps: "Itinéraire",
+    discord: "Discord",
+  };
+  return map[String(kind || "").toLowerCase()] || "Lien";
+}
+
+function parseLinksJson(raw) {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(String(raw));
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (_) {
+    return [];
+  }
+}
+
+function publicBaseUrl(req) {
+  if (CFG.publicBaseUrl) return CFG.publicBaseUrl;
+  const proto = (req.headers && (req.headers["x-forwarded-proto"] || req.protocol)) || "https";
+  const host = req.headers && req.headers.host ? req.headers.host : "cag.mybusinesslife.fr";
+  return `${proto}://${host}`.replace(/\/+$/, "");
+}
+
+function pagePublicUrl(req, slug) {
+  return `${publicBaseUrl(req)}/links/${encodeURIComponent(String(slug || ""))}`;
+}
+
+function pageQrPublicUrl(req, slug) {
+  return `${publicBaseUrl(req)}/qr/${encodeURIComponent(String(slug || ""))}.png`;
+}
+
+function safePublicHref(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "#";
+  try {
+    const parsed = new URL(raw);
+    if (parsed.protocol === "http:" || parsed.protocol === "https:" || parsed.protocol === "mailto:" || parsed.protocol === "tel:") {
+      return raw;
+    }
+  } catch (_) {
+    // keep fallback
+  }
+  return "#";
 }
 
 function sanitizeClientSaleUid(v) {
@@ -584,6 +738,209 @@ async function ensurePosSyncTable(conn) {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`
   );
   POS_SYNC_TABLE_READY = true;
+}
+
+async function ensureLinkPagesTable() {
+  if (LINK_PAGES_TABLE_READY) return;
+  await pool.query(
+    `CREATE TABLE IF NOT EXISTS customer_link_pages (
+      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+      slug VARCHAR(96) NOT NULL,
+      title VARCHAR(160) NOT NULL,
+      subtitle VARCHAR(220) NULL,
+      description TEXT NULL,
+      email VARCHAR(254) NULL,
+      phone VARCHAR(64) NULL,
+      links_json LONGTEXT NULL,
+      is_active TINYINT(1) NOT NULL DEFAULT 1,
+      created_by BIGINT UNSIGNED NULL,
+      updated_by BIGINT UNSIGNED NULL,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      UNIQUE KEY ux_customer_link_pages_slug (slug),
+      KEY idx_customer_link_pages_active (is_active)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`
+  );
+  LINK_PAGES_TABLE_READY = true;
+}
+
+async function uniqueLinkPageSlug(baseSlug, exceptId) {
+  const base = sanitizeSlug(baseSlug) || "page-clients";
+  let candidate = base;
+  for (let i = 2; i < 1000; i += 1) {
+    const values = [candidate];
+    let extra = "";
+    if (exceptId != null) {
+      extra = " AND id <> ?";
+      values.push(Number(exceptId));
+    }
+    const [rows] = await pool.query(
+      `SELECT id FROM customer_link_pages WHERE slug = ?${extra} LIMIT 1`,
+      values
+    );
+    if (!rows || !rows.length) return candidate;
+    const suffix = `-${i}`;
+    candidate = `${base.slice(0, 96 - suffix.length)}${suffix}`;
+  }
+  return `${base.slice(0, 86)}-${crypto.randomUUID().slice(0, 8)}`;
+}
+
+function normalizeLinkPagePayload(body, options) {
+  const opts = options || {};
+  const source = body || {};
+  const title = sanitizeText(source.title, 160);
+  if (!opts.partial && !title) {
+    const err = new Error("Title is required");
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const out = {};
+  if (!opts.partial || source.title !== undefined) out.title = title;
+  if (!opts.partial || source.subtitle !== undefined) out.subtitle = sanitizeNullableText(source.subtitle, 220);
+  if (!opts.partial || source.description !== undefined) out.description = sanitizeNullableText(source.description, 1200);
+  if (!opts.partial || source.email !== undefined) out.email = sanitizeEmail(source.email);
+  if (!opts.partial || source.phone !== undefined) out.phone = sanitizePhone(source.phone);
+  if (!opts.partial || source.links !== undefined) out.links = normalizeSocialLinks(source.links);
+  if (!opts.partial || source.isActive !== undefined || source.is_active !== undefined) {
+    const rawActive = source.isActive !== undefined ? source.isActive : source.is_active;
+    out.isActive = rawActive === undefined ? true : !(rawActive === false || rawActive === "false" || rawActive === "0" || rawActive === 0);
+  }
+  if (source.slug !== undefined) out.slug = sanitizeSlug(source.slug);
+  return out;
+}
+
+function linkPageHasContactContent(page) {
+  return !!(
+    (page && page.email) ||
+    (page && page.phone) ||
+    (page && Array.isArray(page.links) && page.links.length)
+  );
+}
+
+function linkPageFromRow(row, req) {
+  const links = parseLinksJson(row.links_json);
+  return {
+    id: Number(row.id),
+    slug: row.slug || "",
+    title: row.title || "",
+    subtitle: row.subtitle || "",
+    description: row.description || "",
+    email: row.email || "",
+    phone: row.phone || "",
+    links,
+    isActive: !(row.is_active === 0 || row.is_active === "0"),
+    createdAt: row.created_at || null,
+    updatedAt: row.updated_at || null,
+    publicUrl: pagePublicUrl(req, row.slug),
+    qrUrl: pageQrPublicUrl(req, row.slug),
+  };
+}
+
+async function getLinkPageById(id) {
+  await ensureLinkPagesTable();
+  const [rows] = await pool.query(`SELECT * FROM customer_link_pages WHERE id = ? LIMIT 1`, [id]);
+  return rows && rows[0] ? rows[0] : null;
+}
+
+async function getActiveLinkPageBySlug(slug) {
+  await ensureLinkPagesTable();
+  const [rows] = await pool.query(
+    `SELECT * FROM customer_link_pages WHERE slug = ? AND is_active = 1 LIMIT 1`,
+    [slug]
+  );
+  return rows && rows[0] ? rows[0] : null;
+}
+
+async function sendQrPng(reply, value, fileName) {
+  const png = await QRCode.toBuffer(value, {
+    type: "png",
+    errorCorrectionLevel: "M",
+    width: 1600,
+    margin: 1,
+    color: {
+      dark: "#111827ff",
+      light: "#00000000",
+    },
+  });
+  reply
+    .header("Cache-Control", "public, max-age=300")
+    .header("Content-Disposition", `attachment; filename="${fileName}"`)
+    .type("image/png")
+    .send(png);
+}
+
+function renderPublicLinkPage(page) {
+  const links = Array.isArray(page.links) ? page.links : [];
+  const contactLinks = [];
+  if (page.phone) contactLinks.push({ kind: "phone", label: "Téléphone", url: `tel:${String(page.phone).replace(/\s+/g, "")}` });
+  if (page.email) contactLinks.push({ kind: "email", label: "Email", url: `mailto:${page.email}` });
+  const allLinks = contactLinks.concat(links);
+  const initials = String(page.title || "CAG")
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((x) => x[0])
+    .join("")
+    .toUpperCase();
+
+  const buttons = allLinks
+    .map((link) => {
+      const label = escapeHtml(link.label || linkKindLabel(link.kind));
+      const url = escapeHtml(safePublicHref(link.url));
+      const kind = escapeHtml(link.kind || "custom");
+      return `<a class="client-link" data-kind="${kind}" href="${url}" target="${kind === "phone" || kind === "email" ? "_self" : "_blank"}" rel="noopener">${label}<span>Ouvrir</span></a>`;
+    })
+    .join("");
+
+  return `<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>${escapeHtml(page.title)} - Liens utiles</title>
+  <meta name="description" content="${escapeHtml(page.description || page.subtitle || "Liens utiles, email et téléphone.")}">
+  <style>
+    :root { color-scheme: light; --ink:#111827; --muted:#5b6475; --line:rgba(17,24,39,.12); --teal:#0ea5a4; --orange:#f97316; --bg:#f7f9fb; }
+    * { box-sizing: border-box; }
+    body { margin:0; min-height:100vh; font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif; color:var(--ink); background:linear-gradient(180deg,#ffffff 0%,var(--bg) 100%); }
+    main { min-height:100vh; display:grid; place-items:center; padding:28px 16px; }
+    .page { width:min(520px,100%); }
+    .brand { display:flex; align-items:center; gap:14px; margin-bottom:20px; }
+    .mark { width:58px; height:58px; border-radius:14px; display:grid; place-items:center; background:linear-gradient(135deg,var(--teal),var(--orange)); color:#fff; font-weight:900; letter-spacing:.04em; box-shadow:0 18px 42px rgba(17,24,39,.16); }
+    h1 { margin:0; font-size:clamp(30px,8vw,48px); line-height:1; letter-spacing:0; }
+    .subtitle { margin:8px 0 0; color:var(--muted); font-size:16px; line-height:1.45; }
+    .panel { border:1px solid var(--line); border-radius:8px; background:rgba(255,255,255,.86); box-shadow:0 20px 60px rgba(17,24,39,.12); padding:16px; }
+    .desc { margin:0 0 14px; color:#2f3747; line-height:1.55; }
+    .links { display:grid; gap:10px; }
+    .client-link { min-height:56px; display:flex; align-items:center; justify-content:space-between; gap:14px; padding:14px 15px; border:1px solid var(--line); border-radius:8px; background:#fff; color:var(--ink); text-decoration:none; font-weight:800; transition:transform .14s ease, border-color .14s ease, box-shadow .14s ease; }
+    .client-link:hover { transform:translateY(-1px); border-color:rgba(14,165,164,.48); box-shadow:0 12px 30px rgba(17,24,39,.12); }
+    .client-link span { color:var(--muted); font-size:12px; font-weight:800; text-transform:uppercase; letter-spacing:.06em; }
+    .empty { color:var(--muted); padding:18px; text-align:center; }
+    footer { margin-top:16px; color:var(--muted); text-align:center; font-size:12px; }
+    @media (max-width:460px) { main { padding:18px 12px; } .brand { align-items:flex-start; flex-direction:column; } .panel { padding:12px; } }
+  </style>
+</head>
+<body>
+  <main>
+    <section class="page" aria-label="Liens utiles">
+      <div class="brand">
+        <div class="mark">${escapeHtml(initials || "CAG")}</div>
+        <div>
+          <h1>${escapeHtml(page.title)}</h1>
+          ${page.subtitle ? `<p class="subtitle">${escapeHtml(page.subtitle)}</p>` : ""}
+        </div>
+      </div>
+      <div class="panel">
+        ${page.description ? `<p class="desc">${escapeHtml(page.description)}</p>` : ""}
+        <div class="links">${buttons || '<div class="empty">Aucun lien disponible pour le moment.</div>'}</div>
+      </div>
+      <footer>C&G • Liens clients</footer>
+    </section>
+  </main>
+</body>
+</html>`;
 }
 
 async function reserveClientSaleUid(conn, sale, userId) {
@@ -773,6 +1130,25 @@ fastify.get(CFG.apiPrefix + "/health", async () => {
   return { ok: true };
 });
 
+// ---- PUBLIC CLIENT LINK PAGES ----
+fastify.get("/links/:slug", async (req, reply) => {
+  const slug = sanitizeSlug(req.params && req.params.slug);
+  if (!slug) return sendError(reply, 404, "Not found");
+  const row = await getActiveLinkPageBySlug(slug);
+  if (!row) return sendError(reply, 404, "Not found");
+  const page = linkPageFromRow(row, req);
+  reply.header("Cache-Control", "public, max-age=120").type("text/html; charset=utf-8").send(renderPublicLinkPage(page));
+});
+
+fastify.get("/qr/:slug.png", async (req, reply) => {
+  const slug = sanitizeSlug(req.params && req.params.slug);
+  if (!slug) return sendError(reply, 404, "Not found");
+  const row = await getActiveLinkPageBySlug(slug);
+  if (!row) return sendError(reply, 404, "Not found");
+  const publicUrl = pagePublicUrl(req, row.slug);
+  return sendQrPng(reply, publicUrl, `qr-${row.slug}.png`);
+});
+
 // ---- AUTH ----
 fastify.post(CFG.apiPrefix + "/auth/login", async (req, reply) => {
   const body = req.body || {};
@@ -826,6 +1202,188 @@ fastify.get(
   },
   async (req) => {
     return { user: publicUser(req.cagUser) };
+  }
+);
+
+// ---- CLIENT LINK PAGES (ADMIN / MANAGER) ----
+fastify.get(
+  CFG.apiPrefix + "/link-pages",
+  {
+    preHandler: [requireAuth, requireWrite],
+  },
+  async (req) => {
+    await ensureLinkPagesTable();
+    const q = sanitizeText(req.query && req.query.q, 120);
+    const limit = clampInt(req.query && req.query.limit, 1, 100, 50);
+    const offset = clampInt(req.query && req.query.offset, 0, 100000, 0);
+    const values = [];
+    let where = "";
+    if (q) {
+      where = "WHERE title LIKE ? OR slug LIKE ? OR email LIKE ? OR phone LIKE ?";
+      const like = `%${q}%`;
+      values.push(like, like, like, like);
+    }
+    const [rows] = await pool.query(
+      `SELECT SQL_CALC_FOUND_ROWS *
+       FROM customer_link_pages
+       ${where}
+       ORDER BY updated_at DESC, id DESC
+       LIMIT ? OFFSET ?`,
+      values.concat([limit, offset])
+    );
+    const [countRows] = await pool.query(`SELECT FOUND_ROWS() AS total`);
+    const total = countRows && countRows[0] ? Number(countRows[0].total) : rows.length;
+    return {
+      items: (rows || []).map((row) => linkPageFromRow(row, req)),
+      total,
+    };
+  }
+);
+
+fastify.post(
+  CFG.apiPrefix + "/link-pages",
+  {
+    preHandler: [requireAuth, requireWrite],
+  },
+  async (req, reply) => {
+    await ensureLinkPagesTable();
+    const payload = normalizeLinkPagePayload(req.body || {});
+    if (!linkPageHasContactContent(payload)) return sendError(reply, 400, "At least one contact method or link is required");
+    const slug = await uniqueLinkPageSlug(payload.slug || payload.title);
+    const userId = Number(req.cagUser && req.cagUser.id_user) || null;
+    const [res] = await pool.query(
+      `INSERT INTO customer_link_pages
+       (slug, title, subtitle, description, email, phone, links_json, is_active, created_by, updated_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        slug,
+        payload.title,
+        payload.subtitle,
+        payload.description,
+        payload.email,
+        payload.phone,
+        JSON.stringify(payload.links || []),
+        payload.isActive ? 1 : 0,
+        userId,
+        userId,
+      ]
+    );
+    const row = await getLinkPageById(res.insertId);
+    reply.code(201).send({ page: linkPageFromRow(row, req) });
+  }
+);
+
+fastify.get(
+  CFG.apiPrefix + "/link-pages/:id",
+  {
+    preHandler: [requireAuth, requireWrite],
+  },
+  async (req, reply) => {
+    const id = Number(req.params && req.params.id);
+    if (!Number.isInteger(id) || id <= 0) return sendError(reply, 400, "Invalid id");
+    const row = await getLinkPageById(id);
+    if (!row) return sendError(reply, 404, "Not found");
+    return { page: linkPageFromRow(row, req) };
+  }
+);
+
+fastify.patch(
+  CFG.apiPrefix + "/link-pages/:id",
+  {
+    preHandler: [requireAuth, requireWrite],
+  },
+  async (req, reply) => {
+    const id = Number(req.params && req.params.id);
+    if (!Number.isInteger(id) || id <= 0) return sendError(reply, 400, "Invalid id");
+    const existing = await getLinkPageById(id);
+    if (!existing) return sendError(reply, 404, "Not found");
+
+    const payload = normalizeLinkPagePayload(req.body || {}, { partial: true });
+    const mergedForValidation = {
+      email: payload.email !== undefined ? payload.email : existing.email,
+      phone: payload.phone !== undefined ? payload.phone : existing.phone,
+      links: payload.links !== undefined ? payload.links : parseLinksJson(existing.links_json),
+    };
+    if (!linkPageHasContactContent(mergedForValidation)) {
+      return sendError(reply, 400, "At least one contact method or link is required");
+    }
+    const fields = [];
+    const values = [];
+    if (payload.slug !== undefined) {
+      const slugSource = payload.slug || payload.title || existing.title;
+      fields.push("slug = ?");
+      values.push(await uniqueLinkPageSlug(slugSource, id));
+    }
+    if (payload.title !== undefined) {
+      if (!payload.title) return sendError(reply, 400, "Title is required");
+      fields.push("title = ?");
+      values.push(payload.title);
+    }
+    if (payload.subtitle !== undefined) {
+      fields.push("subtitle = ?");
+      values.push(payload.subtitle);
+    }
+    if (payload.description !== undefined) {
+      fields.push("description = ?");
+      values.push(payload.description);
+    }
+    if (payload.email !== undefined) {
+      fields.push("email = ?");
+      values.push(payload.email);
+    }
+    if (payload.phone !== undefined) {
+      fields.push("phone = ?");
+      values.push(payload.phone);
+    }
+    if (payload.links !== undefined) {
+      fields.push("links_json = ?");
+      values.push(JSON.stringify(payload.links));
+    }
+    if (payload.isActive !== undefined) {
+      fields.push("is_active = ?");
+      values.push(payload.isActive ? 1 : 0);
+    }
+    fields.push("updated_by = ?");
+    values.push(Number(req.cagUser && req.cagUser.id_user) || null);
+
+    if (!fields.length) return sendError(reply, 400, "No changes");
+    values.push(id);
+    await pool.query(`UPDATE customer_link_pages SET ${fields.join(", ")} WHERE id = ?`, values);
+    const row = await getLinkPageById(id);
+    return { page: linkPageFromRow(row, req) };
+  }
+);
+
+fastify.delete(
+  CFG.apiPrefix + "/link-pages/:id",
+  {
+    preHandler: [requireAuth, requireWrite],
+  },
+  async (req, reply) => {
+    const id = Number(req.params && req.params.id);
+    if (!Number.isInteger(id) || id <= 0) return sendError(reply, 400, "Invalid id");
+    const row = await getLinkPageById(id);
+    if (!row) return sendError(reply, 404, "Not found");
+    await pool.query(
+      `UPDATE customer_link_pages SET is_active = 0, updated_by = ? WHERE id = ?`,
+      [Number(req.cagUser && req.cagUser.id_user) || null, id]
+    );
+    return { ok: true };
+  }
+);
+
+fastify.get(
+  CFG.apiPrefix + "/link-pages/:id/qr.png",
+  {
+    preHandler: [requireAuth, requireWrite],
+  },
+  async (req, reply) => {
+    const id = Number(req.params && req.params.id);
+    if (!Number.isInteger(id) || id <= 0) return sendError(reply, 400, "Invalid id");
+    const row = await getLinkPageById(id);
+    if (!row) return sendError(reply, 404, "Not found");
+    const publicUrl = pagePublicUrl(req, row.slug);
+    return sendQrPng(reply, publicUrl, `qr-${row.slug}.png`);
   }
 );
 
