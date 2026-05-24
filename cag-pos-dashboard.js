@@ -215,9 +215,8 @@
     var epProducts = (root.getAttribute("data-ep-products") || "/products").trim();
     var epProductCategories = (root.getAttribute("data-ep-product-categories") || "/products/categories").trim();
     var epOffers = (root.getAttribute("data-ep-offers") || "/offers").trim();
-    var epLinkPages = (root.getAttribute("data-ep-link-pages") || "/link-pages").trim();
     var requestTimeoutMs = parseInt(root.getAttribute("data-request-timeout-ms") || "15000", 10);
-    var writeRequestTimeoutMs = parseInt(root.getAttribute("data-write-timeout-ms") || "45000", 10);
+    var writeRequestTimeoutMs = parseInt(root.getAttribute("data-write-timeout-ms") || "60000", 10);
 
     return {
       apiBase: apiBase.replace(/\/+$/, ""),
@@ -239,9 +238,8 @@
       epProducts: epProducts,
       epProductCategories: epProductCategories,
       epOffers: epOffers,
-      epLinkPages: epLinkPages,
       requestTimeoutMs: Number.isFinite(requestTimeoutMs) ? clamp(requestTimeoutMs, 5000, 120000) : 15000,
-      writeRequestTimeoutMs: Number.isFinite(writeRequestTimeoutMs) ? clamp(writeRequestTimeoutMs, 10000, 180000) : 45000,
+      writeRequestTimeoutMs: Number.isFinite(writeRequestTimeoutMs) ? clamp(writeRequestTimeoutMs, 5000, 60000) : 15000,
     };
   }
 
@@ -285,10 +283,14 @@
   function readAuth(cfg) {
     try {
       var raw = localStorage.getItem(cfg.storageKey);
+      if (!raw) raw = localStorage.getItem(cfg.storageKey + "__alwaysdata");
       if (!raw) return null;
       var data = safeJsonParse(raw);
       if (!data || typeof data !== "object") return null;
       if (typeof data.token !== "string" || !data.token) return null;
+      if (!localStorage.getItem(cfg.storageKey)) {
+        localStorage.setItem(cfg.storageKey, JSON.stringify(data));
+      }
       return data;
     } catch (_) {
       return null;
@@ -306,6 +308,7 @@
   function clearAuth(cfg) {
     try {
       localStorage.removeItem(cfg.storageKey);
+      localStorage.removeItem(cfg.storageKey + "__alwaysdata");
     } catch (_) {
       // ignore
     }
@@ -371,6 +374,7 @@
             : null,
       price: p.price != null ? Number(p.price) : null,
       productType: p.productType || p.product_type || "",
+      imageUrl: p.imageUrl || p.image_url || "",
       lastUpdated: p.last_updated || p.lastUpdated || null,
       raw: p,
     };
@@ -398,61 +402,6 @@
       productIds: productIds,
       lastUpdated: o.last_updated || o.lastUpdated || null,
       raw: o,
-    };
-  }
-
-  function linkKindOptions() {
-    return [
-      ["website", "Site web"],
-      ["instagram", "Instagram"],
-      ["facebook", "Facebook"],
-      ["tiktok", "TikTok"],
-      ["youtube", "YouTube"],
-      ["linkedin", "LinkedIn"],
-      ["x", "X"],
-      ["snapchat", "Snapchat"],
-      ["whatsapp", "WhatsApp"],
-      ["reviews", "Avis Google"],
-      ["maps", "Google Maps"],
-      ["discord", "Discord"],
-      ["custom", "Autre"],
-    ];
-  }
-
-  function linkKindLabel(kind) {
-    var found = linkKindOptions().filter(function (x) {
-      return x[0] === String(kind || "").toLowerCase();
-    })[0];
-    return found ? found[1] : "Lien";
-  }
-
-  function normalizeLinkPage(p) {
-    if (!p) return null;
-    var links = Array.isArray(p.links) ? p.links : [];
-    return {
-      id: p.id,
-      slug: p.slug || "",
-      title: p.title || "",
-      subtitle: p.subtitle || "",
-      description: p.description || "",
-      email: p.email || "",
-      phone: p.phone || "",
-      links: links
-        .map(function (x) {
-          return {
-            kind: x && x.kind ? String(x.kind) : "custom",
-            label: x && x.label ? String(x.label) : linkKindLabel(x && x.kind),
-            url: x && x.url ? String(x.url) : "",
-          };
-        })
-        .filter(function (x) {
-          return !!x.url;
-        }),
-      isActive: !(p.isActive === false || p.is_active === 0 || p.is_active === "0"),
-      publicUrl: p.publicUrl || p.public_url || "",
-      qrUrl: p.qrUrl || p.qr_url || "",
-      updatedAt: p.updatedAt || p.updated_at || null,
-      raw: p,
     };
   }
 
@@ -534,33 +483,50 @@
     var url = cfg.apiBase + path;
     if (opts.query) {
       var usp = new URLSearchParams();
+      var keepEmptyQuery = !!opts.keepEmptyQuery;
       Object.keys(opts.query).forEach(function (k) {
         var v = opts.query[k];
-        if (v == null || v === "") return;
+        if (v == null) return;
+        if (v === "" && !keepEmptyQuery) return;
         usp.set(k, String(v));
       });
       var qs = usp.toString();
       if (qs) url += (url.indexOf("?") === -1 ? "?" : "&") + qs;
     }
 
+    var useSimpleAuth = !!opts.simpleAuth;
     var headers = Object.assign({ Accept: "application/json" }, opts.headers || {});
-    if (opts.json !== undefined) headers["Content-Type"] = "application/json";
+    if (opts.json !== undefined) headers["Content-Type"] = useSimpleAuth ? "text/plain;charset=UTF-8" : "application/json";
 
     var auth = readAuth(cfg);
-    if (auth && auth.token) headers.Authorization = "Bearer " + auth.token;
+    if (useSimpleAuth && (!auth || !auth.token)) {
+      var authErr = new Error("Session expirée. Reconnexion requise.");
+      authErr.status = 401;
+      throw authErr;
+    }
+    if (!useSimpleAuth && !opts.noAuthHeader && auth && auth.token) headers.Authorization = "Bearer " + auth.token;
 
     var method = String(opts.method || "GET").toUpperCase();
     var baseTimeoutMs = cfg && Number.isFinite(Number(cfg.requestTimeoutMs)) ? Number(cfg.requestTimeoutMs) : 15000;
-    var writeTimeoutMs = cfg && Number.isFinite(Number(cfg.writeRequestTimeoutMs)) ? Number(cfg.writeRequestTimeoutMs) : 45000;
+    var writeTimeoutMs = cfg && Number.isFinite(Number(cfg.writeRequestTimeoutMs)) ? Number(cfg.writeRequestTimeoutMs) : 15000;
     var isWriteMethod = method === "POST" || method === "PUT" || method === "PATCH" || method === "DELETE";
-    var timeoutMs = isWriteMethod ? Math.max(baseTimeoutMs, writeTimeoutMs) : baseTimeoutMs;
+    var timeoutMs = Number.isFinite(Number(opts.timeoutMs)) ? Number(opts.timeoutMs) : isWriteMethod ? writeTimeoutMs : baseTimeoutMs;
     var ctrl = typeof AbortController !== "undefined" ? new AbortController() : null;
     var timer = null;
+
+    var bodyPayload;
+    if (opts.json !== undefined) {
+      if (useSimpleAuth) {
+        bodyPayload = JSON.stringify(Object.assign({}, opts.json || {}, { _token: auth && auth.token ? auth.token : "" }));
+      } else {
+        bodyPayload = JSON.stringify(opts.json);
+      }
+    }
 
     var fetchPromise = fetch(url, {
         method: method,
         headers: headers,
-        body: opts.json !== undefined ? JSON.stringify(opts.json) : undefined,
+        body: bodyPayload,
         signal: ctrl ? ctrl.signal : undefined,
       });
 
@@ -605,43 +571,6 @@
     return data;
   }
 
-  async function apiFetchBlob(cfg, path, opts) {
-    opts = opts || {};
-    if (!cfg.apiBase) throw new Error("data-api-base manquant");
-    var headers = Object.assign({ Accept: opts.accept || "application/octet-stream" }, opts.headers || {});
-    var auth = readAuth(cfg);
-    if (auth && auth.token) headers.Authorization = "Bearer " + auth.token;
-    var res = await fetch(cfg.apiBase + path, { method: opts.method || "GET", headers: headers });
-    if (!res.ok) {
-      var text = await res.text();
-      var data = safeJsonParse(text);
-      var err = new Error((data && data.message) || ("HTTP " + res.status));
-      err.status = res.status;
-      err.data = data || text;
-      throw err;
-    }
-    return res.blob();
-  }
-
-  function downloadBlob(blob, filename) {
-    var url = URL.createObjectURL(blob);
-    var a = el("a", { href: url, download: filename });
-    document.body.appendChild(a);
-    a.click();
-    window.setTimeout(function () {
-      URL.revokeObjectURL(url);
-      if (a && a.parentNode) a.parentNode.removeChild(a);
-    }, 200);
-  }
-
-  function copyText(value) {
-    if (navigator.clipboard && navigator.clipboard.writeText) return navigator.clipboard.writeText(value);
-    return new Promise(function (resolve) {
-      window.prompt("Copier le lien", value);
-      resolve();
-    });
-  }
-
   function renderAppChrome(root, cfg) {
     var app = el("div", { class: "cag-app" }, el("div", { class: "cag-grid" }), el("div", { class: "cag-shell" }));
     root.innerHTML = "";
@@ -655,7 +584,7 @@
     var title = el("h1", { text: "Se connecter" });
     var hint = el(
       "p",
-      { html: "Connecte-toi pour accéder au dashboard, gérer les produits / offres et préparer les pages clients." }
+      { html: "Connecte-toi pour accéder au dashboard et gérer les produits / offres." }
     );
 
     var fUser = el("input", {
@@ -807,13 +736,12 @@
     };
   }
 
-  function renderTabs(cfg, state) {
+  function renderTabs(state) {
     var tabs = [
       { id: "overview", label: "Apercu" },
       { id: "sales", label: "Ventes" },
       { id: "products", label: "Produits" },
       { id: "offers", label: "Offres" },
-      { id: "link-pages", label: "Page clients" },
     ];
     var wrap = el("div", { class: "cag-tabs", role: "tablist" });
     tabs.forEach(function (t) {
@@ -1136,12 +1064,6 @@
     return view;
   }
 
-  function renderLinkPagesView() {
-    var view = el("div", { class: "cag-view", "data-view": "link-pages" });
-    view.appendChild(el("div", { class: "cag-empty", text: "Chargement..." }));
-    return view;
-  }
-
   function openModal(root, titleText, bodyNode, actionsNode) {
     var backdrop = el("div", { class: "cag-modal-backdrop", role: "dialog", "aria-modal": "true" });
     var modal = el(
@@ -1249,35 +1171,94 @@
   }
 
   async function createProduct(cfg, payload) {
-    return apiFetch(cfg, cfg.epProducts, { method: "POST", json: payload });
+    var lastErr = null;
+
+    try {
+      return await apiFetch(cfg, cfg.epProducts, { method: "POST", json: payload, simpleAuth: true });
+    } catch (errSimple) {
+      lastErr = errSimple;
+    }
+
+    try {
+      return await apiFetch(cfg, cfg.epProducts, {
+        method: "POST",
+        query: buildWriteQueryPayload(cfg, payload),
+        keepEmptyQuery: true,
+        noAuthHeader: true,
+      });
+    } catch (errQuery) {
+      lastErr = errQuery;
+    }
+
+    return apiFetch(cfg, cfg.epProducts, { method: "POST", json: payload }).catch(function (errAuth) {
+      throw errAuth || lastErr || new Error("Erreur creation produit");
+    });
+  }
+
+  function buildWriteQueryPayload(cfg, payload) {
+    var out = {};
+    var auth = readAuth(cfg);
+    if (auth && auth.token) out._token = auth.token;
+    Object.keys(payload || {}).forEach(function (k) {
+      var v = payload[k];
+      if (v === undefined) return;
+      out[k] = v == null ? "" : String(v);
+    });
+    return out;
   }
 
   async function updateProduct(cfg, id, payload) {
-    var path = cfg.epProducts + "/" + encodeURIComponent(String(id));
+    var idEnc = encodeURIComponent(String(id));
+    var path = cfg.epProducts + "/" + idEnc;
+    var simplePath = cfg.epProducts + "/" + idEnc + "/update";
     var lastErr = null;
 
-    for (var i = 0; i < 2; i++) {
-      try {
-        return await apiFetch(cfg, path, { method: "PUT", json: payload });
-      } catch (errPut) {
-        lastErr = errPut;
-        var s = errPut && errPut.status;
-        var isTransient = s === 408 || s === 429 || s === 500 || s === 502 || s === 503 || s === 504;
-        var isMethodCompat = s === 404 || s === 405 || s === 501;
+    try {
+      return await apiFetch(cfg, simplePath, { method: "POST", json: payload, simpleAuth: true });
+    } catch (errSimple) {
+      lastErr = errSimple;
+    }
 
-        if (isMethodCompat) break;
-        if (isTransient && i === 0) {
-          await delay(700);
-          continue;
+    try {
+      return await apiFetch(cfg, simplePath, {
+        method: "POST",
+        query: buildWriteQueryPayload(cfg, payload),
+        keepEmptyQuery: true,
+        noAuthHeader: true,
+      });
+    } catch (errQuery) {
+      lastErr = errQuery;
+    }
+
+    async function call(method) {
+      try {
+        return await apiFetch(cfg, path, { method: method, json: payload });
+      } catch (err) {
+        var status = err && err.status;
+        var methodCompat = status === 404 || status === 405 || status === 501;
+        if (methodCompat) {
+          err._methodCompat = true;
+          throw err;
         }
-        throw errPut;
+        var transientErr = status === 408 || status === 429 || status === 500 || status === 502 || status === 503 || status === 504;
+        if (!transientErr) throw err;
+        await delay(350);
+        return apiFetch(cfg, path, { method: method, json: payload });
       }
     }
 
     try {
-      return await apiFetch(cfg, path, { method: "PATCH", json: payload });
+      return await call("PUT");
+    } catch (errPut) {
+      lastErr = errPut;
+      if (errPut && errPut._methodCompat) {
+        // compat issue: continue directly with PATCH fallback.
+      }
+    }
+    try {
+      return await call("PATCH");
     } catch (errPatch) {
-      throw errPatch || lastErr;
+      throw errPatch || lastErr || new Error("Erreur mise a jour produit");
     }
   }
 
@@ -1301,26 +1282,6 @@
     return apiFetch(cfg, cfg.epOffers + "/" + encodeURIComponent(String(id)), { method: "DELETE" });
   }
 
-  async function loadLinkPages(cfg, q, limit, offset) {
-    return apiFetch(cfg, cfg.epLinkPages, { method: "GET", query: { q: q || "", limit: limit, offset: offset } });
-  }
-
-  async function createLinkPage(cfg, payload) {
-    return apiFetch(cfg, cfg.epLinkPages, { method: "POST", json: payload });
-  }
-
-  async function updateLinkPage(cfg, id, payload) {
-    return apiFetch(cfg, cfg.epLinkPages + "/" + encodeURIComponent(String(id)), { method: "PATCH", json: payload });
-  }
-
-  async function disableLinkPage(cfg, id) {
-    return apiFetch(cfg, cfg.epLinkPages + "/" + encodeURIComponent(String(id)), { method: "DELETE" });
-  }
-
-  async function fetchLinkPageQr(cfg, id) {
-    return apiFetchBlob(cfg, cfg.epLinkPages + "/" + encodeURIComponent(String(id)) + "/qr.png", { accept: "image/png" });
-  }
-
   function renderDashboard(shell, root, cfg, state) {
     var fmtMoney = moneyFormatter(cfg);
     var fmtCompact = compactNumberFormatter(cfg);
@@ -1333,19 +1294,17 @@
     }
 
     var chrome = renderTopbar(cfg, state, fmtMoney, fmtCompact);
-    var tabs = renderTabs(cfg, state);
+    var tabs = renderTabs(state);
 
     var main = el("div", { class: "cag-main" });
     var vOverview = renderOverviewView(state, fmtMoney, fmtCompact);
     var vSales = renderSalesView();
     var vProducts = renderProductsView();
     var vOffers = renderOffersView();
-    var vLinkPages = renderLinkPagesView();
     main.appendChild(vOverview);
     main.appendChild(vSales);
     main.appendChild(vProducts);
     main.appendChild(vOffers);
-    main.appendChild(vLinkPages);
 
     shell.appendChild(chrome.topbar);
     shell.appendChild(tabs);
@@ -1483,7 +1442,6 @@
       if (id === "sales") refreshSales();
       if (id === "products") refreshProducts();
       if (id === "offers") refreshOffers();
-      if (id === "link-pages") refreshLinkPages();
     });
 
     // ---- Overview ----
@@ -2172,7 +2130,47 @@
         var fQty = el("input", { class: "cag-input", type: "number", step: "1", value: product && product.quantity != null ? String(product.quantity) : "" });
         var fBuy = el("input", { class: "cag-input", type: "number", step: "0.01", value: product && product.purchasePrice != null ? String(product.purchasePrice) : "" });
         var fSell = el("input", { class: "cag-input", type: "number", step: "0.01", value: product && product.price != null ? String(product.price) : "" });
+        var fImage = el("input", {
+          class: "cag-input",
+          type: "url",
+          inputmode: "url",
+          placeholder: "https://...",
+          value: (product && product.imageUrl) || "",
+        });
         var fDesc = el("textarea", { class: "cag-input", rows: 3, value: (product && product.description) || "" });
+        var imagePreview = el("img", {
+          class: "cag-image-preview",
+          alt: "Aperçu image produit",
+          style: { display: "none" },
+        });
+        var imagePreviewHint = el("div", {
+          class: "cag-small cag-image-preview-hint",
+          text: "Colle un lien public d'image pour voir l'aperçu.",
+        });
+
+        function syncImagePreview() {
+          var value = fImage.value.trim();
+          if (!value) {
+            imagePreview.removeAttribute("src");
+            imagePreview.style.display = "none";
+            imagePreviewHint.textContent = "Colle un lien public d'image pour voir l'aperçu.";
+            return;
+          }
+          imagePreview.src = value;
+          imagePreview.style.display = "";
+          imagePreviewHint.textContent = value;
+        }
+
+        imagePreview.addEventListener("error", function () {
+          imagePreview.style.display = "none";
+          imagePreviewHint.textContent = "Image introuvable ou inaccessible depuis un lien public.";
+        });
+        imagePreview.addEventListener("load", function () {
+          imagePreview.style.display = "";
+          imagePreviewHint.textContent = "Aperçu chargé.";
+        });
+        fImage.addEventListener("input", syncImagePreview);
+        syncImagePreview();
 
         var form = el(
           "form",
@@ -2184,6 +2182,8 @@
           el("div", { class: "cag-field" }, el("label", { text: "Stock" }), fQty),
           el("div", { class: "cag-field" }, el("label", { text: "Prix d'achat" }), fBuy),
           el("div", { class: "cag-field" }, el("label", { text: "Prix de vente" }), fSell),
+          el("div", { class: "cag-field cag-field-full" }, el("label", { text: "Lien image" }), fImage),
+          el("div", { class: "cag-field cag-field-full" }, el("label", { text: "Aperçu" }), el("div", { class: "cag-image-preview-wrap" }, imagePreview, imagePreviewHint)),
           el("div", { class: "cag-field cag-field-full" }, el("label", { text: "Description" }), fDesc)
         );
         var productFormId = "cag-product-form-" + Date.now() + "-" + Math.floor(Math.random() * 100000);
@@ -2193,7 +2193,8 @@
         saveBtn.setAttribute("form", productFormId);
         var cancelBtn = el("button", { class: "cag-btn", type: "button", text: "Annuler" });
 
-        var actions = el("div", { class: "cag-form-actions" }, cancelBtn, saveBtn);
+        var feedback = el("div", { class: "cag-form-feedback", "aria-live": "polite" });
+        var actions = el("div", { class: "cag-form-actions" }, feedback, cancelBtn, saveBtn);
         var modal = openModal(root, isEdit ? "Modifier produit" : "Ajouter produit", form, actions);
 
         cancelBtn.addEventListener("click", modal.close);
@@ -2202,6 +2203,8 @@
           e.preventDefault();
           (async function () {
             setBusy(saveBtn, true, "Sauvegarde...");
+            feedback.textContent = "";
+            feedback.removeAttribute("data-kind");
             try {
               function parseNumberField(rawValue, fieldLabel) {
                 var parsed = parseInputNumber(rawValue);
@@ -2218,12 +2221,14 @@
               if (!nameValue) throw new Error("Nom requis");
 
               var payload;
+              var imageValue = fImage.value.trim();
               if (isEdit) {
                 payload = {};
                 if (nameValue !== (product.name || "")) payload.name = nameValue;
                 if (typeValue !== (product.productType || "")) payload.productType = typeValue;
                 if (fBarcode.value.trim() !== (product.barcode || "")) payload.barcode = fBarcode.value.trim();
                 if (fRef.value.trim() !== (product.reference || "")) payload.reference = fRef.value.trim();
+                if (imageValue !== (product.imageUrl || "")) payload.imageUrl = imageValue;
                 if (String(fDesc.value || "") !== String(product.description || "")) payload.description = fDesc.value;
 
                 if (qtyVal !== undefined && qtyVal !== product.quantity) payload.quantity = qtyVal;
@@ -2240,6 +2245,7 @@
                   productType: typeValue,
                   barcode: fBarcode.value.trim(),
                   reference: fRef.value.trim(),
+                  imageUrl: imageValue,
                   description: fDesc.value,
                 };
                 payload.quantity = qtyVal === undefined ? null : qtyVal;
@@ -2251,16 +2257,23 @@
                 window.console.debug("[CAG] save product", { id: isEdit ? product.id : null, payload: payload });
               }
 
-              if (isEdit) await updateProduct(cfg, product.id, payload);
-              else await createProduct(cfg, payload);
+              var saveRes = null;
+              if (isEdit) saveRes = await updateProduct(cfg, product.id, payload);
+              else saveRes = await createProduct(cfg, payload);
 
-              toast(root, isEdit ? "Produit mis à jour." : "Produit créé.", "ok");
+              var okMsg = isEdit ? "Produit mis a jour." : "Produit cree.";
+              if (isEdit && saveRes && saveRes.eventual) okMsg = "Produit mis a jour (confirme apres relecture).";
+              feedback.textContent = okMsg;
+              feedback.setAttribute("data-kind", "ok");
+              toast(root, okMsg, "ok");
               modal.close();
               run();
             } catch (err) {
               var msg = (err && err.message) || "Erreur sauvegarde produit";
               if (err && err.status) msg += " (HTTP " + err.status + ")";
               if (err && err.data && err.data.hint) msg += " - " + err.data.hint;
+              feedback.textContent = msg;
+              feedback.setAttribute("data-kind", "err");
               toast(root, msg, "err", 5200);
             } finally {
               setBusy(saveBtn, false, isEdit ? "Enregistrer" : "Créer");
@@ -2442,7 +2455,8 @@
         var saveBtn = el("button", { class: "cag-btn cag-btn-primary", type: "submit", text: isEdit ? "Enregistrer" : "Créer" });
         saveBtn.setAttribute("form", offerFormId);
         var cancelBtn = el("button", { class: "cag-btn", type: "button", text: "Annuler" });
-        var actions = el("div", { class: "cag-form-actions" }, cancelBtn, saveBtn);
+        var feedback = el("div", { class: "cag-form-feedback", "aria-live": "polite" });
+        var actions = el("div", { class: "cag-form-actions" }, feedback, cancelBtn, saveBtn);
 
         var modal = openModal(root, isEdit ? "Modifier offre" : "Ajouter offre", form, actions);
         cancelBtn.addEventListener("click", modal.close);
@@ -2499,6 +2513,8 @@
           e.preventDefault();
           (async function () {
             setBusy(saveBtn, true, "Sauvegarde...");
+            feedback.textContent = "";
+            feedback.removeAttribute("data-kind");
             try {
               var productIds = Object.keys(selected).map(function (k) {
                 return Number(k);
@@ -2514,11 +2530,18 @@
               if (isEdit) await updateOffer(cfg, offer.id, payload);
               else await createOffer(cfg, payload);
 
+              feedback.textContent = isEdit ? "Offre mise a jour." : "Offre creee.";
+              feedback.setAttribute("data-kind", "ok");
               toast(root, isEdit ? "Offre mise à jour." : "Offre créée.", "ok");
               modal.close();
               run();
             } catch (err) {
-              toast(root, (err && err.message) || "Erreur sauvegarde offre", "err", 5200);
+              var msg = (err && err.message) || "Erreur sauvegarde offre";
+              if (err && err.status) msg += " (HTTP " + err.status + ")";
+              if (err && err.data && err.data.hint) msg += " - " + err.data.hint;
+              feedback.textContent = msg;
+              feedback.setAttribute("data-kind", "err");
+              toast(root, msg, "err", 5200);
             } finally {
               setBusy(saveBtn, false, isEdit ? "Enregistrer" : "Créer");
             }
@@ -2543,318 +2566,6 @@
       run();
     }
 
-    // ---- Client link pages ----
-    async function refreshLinkPages() {
-      var view = $('.cag-view[data-view="link-pages"]', shell);
-      if (!view) return;
-
-      if (!state.linkPages) state.linkPages = { q: "", limit: 20, offset: 0, total: 0, items: [] };
-      view.innerHTML = "";
-
-      if (!canWrite(cfg, state.user)) {
-        view.appendChild(
-          el(
-            "div",
-            { class: "cag-panel" },
-            el("h2", { text: "Page clients" }),
-            el("div", { class: "cag-empty", text: "Accès réservé aux managers et administrateurs." })
-          )
-        );
-        return;
-      }
-
-      var qInput = el("input", { class: "cag-input", type: "search", placeholder: "Recherche page, email, téléphone...", value: state.linkPages.q || "" });
-      var addBtn = el("button", { class: "cag-btn cag-btn-primary", type: "button", text: "Créer une page" });
-      var prevBtn = el("button", { class: "cag-btn", type: "button", text: "Précédent" });
-      var nextBtn = el("button", { class: "cag-btn", type: "button", text: "Suivant" });
-      var reloadBtn = el("button", { class: "cag-btn", type: "button", text: "Rafraichir" });
-
-      var toolbar = el(
-        "div",
-        { class: "cag-toolbar" },
-        el("div", { class: "cag-toolbar-left" }, qInput, reloadBtn),
-        el("div", { class: "cag-toolbar-right" }, addBtn, prevBtn, nextBtn)
-      );
-
-      var box = el(
-        "div",
-        { class: "cag-panel" },
-        el("h2", { text: "Pages clients & QR codes" }),
-        el("div", { class: "cag-small cag-section-hint", text: "Chaque page regroupe les réseaux sociaux, l'email et le téléphone. Le QR généré pointe vers la page publique." }),
-        toolbar,
-        el("div", { class: "cag-empty", text: "Chargement..." })
-      );
-      view.appendChild(box);
-
-      async function run() {
-        try {
-          var r = await loadLinkPages(cfg, state.linkPages.q, state.linkPages.limit, state.linkPages.offset);
-          var items = (r && (r.items || (r.data && r.data.items) || r.pages)) || [];
-          var total = toNumber((r && (r.total || (r.data && r.data.total))) || items.length) || items.length;
-          state.linkPages.total = total;
-          state.linkPages.items = items.map(normalizeLinkPage).filter(Boolean);
-
-          var rows = state.linkPages.items.map(function (p) {
-            var actions = el("div", { class: "cag-row-actions" });
-            var editBtn = el("button", { class: "cag-btn", type: "button", text: "Modifier" });
-            var qrBtn = el("button", { class: "cag-btn cag-btn-primary", type: "button", text: "QR PNG" });
-            var copyBtn = el("button", { class: "cag-btn", type: "button", text: "Copier lien" });
-            var openBtn = el("button", { class: "cag-btn", type: "button", text: "Ouvrir" });
-            var disableBtn = el("button", { class: "cag-btn cag-btn-danger", type: "button", text: "Désactiver" });
-
-            editBtn.addEventListener("click", function () {
-              openLinkPageModal(p);
-            });
-            qrBtn.addEventListener("click", function () {
-              downloadQr(p);
-            });
-            copyBtn.addEventListener("click", function () {
-              if (!p.publicUrl) return;
-              copyText(p.publicUrl).then(function () {
-                toast(root, "Lien copié.", "ok");
-              });
-            });
-            openBtn.addEventListener("click", function () {
-              if (p.publicUrl) window.open(p.publicUrl, "_blank", "noopener");
-            });
-            disableBtn.addEventListener("click", function () {
-              onDisable(p);
-            });
-            actions.appendChild(editBtn);
-            actions.appendChild(qrBtn);
-            actions.appendChild(copyBtn);
-            actions.appendChild(openBtn);
-            if (p.isActive) actions.appendChild(disableBtn);
-
-            return el(
-              "tr",
-              {},
-              el(
-                "td",
-                {},
-                el("strong", { text: p.title || "—" }),
-                el("div", { class: "cag-small", text: p.publicUrl || "/links/" + p.slug })
-              ),
-              el("td", { text: [p.phone, p.email].filter(Boolean).join(" • ") || "—" }),
-              el("td", { text: p.links && p.links.length ? String(p.links.length) : "—" }),
-              el("td", {}, el("span", { class: "cag-pill" + (p.isActive ? "" : " cag-pill-muted"), text: p.isActive ? "Active" : "Inactive" })),
-              el("td", {}, actions)
-            );
-          });
-
-          var t = table(["Page", "Contact", "Liens", "Statut", "Actions"], rows);
-          var pag = paginate(state.linkPages, total);
-          prevBtn.disabled = pag.page <= 1;
-          nextBtn.disabled = pag.page >= pag.pages;
-
-          var footer = el("div", { class: "cag-footer-row" }, el("div", { class: "cag-small", text: "Page " + pag.page + " / " + pag.pages + " • Total: " + total }));
-          var empty = $(".cag-empty", box);
-          if (empty) empty.parentNode.removeChild(empty);
-          $all(".cag-scroll-x, .cag-footer-row", box).forEach(function (n) {
-            if (n && n.parentNode) n.parentNode.removeChild(n);
-          });
-          box.appendChild(t);
-          box.appendChild(footer);
-        } catch (err) {
-          var empty2 = $(".cag-empty", box);
-          if (empty2) empty2.textContent = (err && err.message) || "Erreur chargement pages clients";
-          else box.appendChild(el("div", { class: "cag-empty", text: (err && err.message) || "Erreur" }));
-        }
-      }
-
-      function debounce(fn, ms) {
-        var t = null;
-        return function () {
-          var args = arguments;
-          window.clearTimeout(t);
-          t = window.setTimeout(function () {
-            fn.apply(null, args);
-          }, ms);
-        };
-      }
-
-      qInput.addEventListener(
-        "input",
-        debounce(function () {
-          state.linkPages.q = qInput.value.trim();
-          state.linkPages.offset = 0;
-          run();
-        }, 300)
-      );
-      reloadBtn.addEventListener("click", run);
-      prevBtn.addEventListener("click", function () {
-        state.linkPages.offset = Math.max(0, state.linkPages.offset - state.linkPages.limit);
-        run();
-      });
-      nextBtn.addEventListener("click", function () {
-        state.linkPages.offset = state.linkPages.offset + state.linkPages.limit;
-        run();
-      });
-      addBtn.addEventListener("click", function () {
-        openLinkPageModal(null);
-      });
-
-      async function downloadQr(page) {
-        if (!page || page.id == null) return;
-        try {
-          var blob = await fetchLinkPageQr(cfg, page.id);
-          downloadBlob(blob, "qr-" + (page.slug || page.id) + ".png");
-          toast(root, "QR PNG téléchargé.", "ok");
-        } catch (err) {
-          toast(root, (err && err.message) || "Erreur génération QR", "err", 5200);
-        }
-      }
-
-      function onDisable(page) {
-        if (!page || page.id == null) return;
-        if (!window.confirm("Désactiver la page '" + (page.title || "") + "' ?")) return;
-        (async function () {
-          try {
-            await disableLinkPage(cfg, page.id);
-            toast(root, "Page désactivée.", "ok");
-            run();
-          } catch (err) {
-            toast(root, (err && err.message) || "Erreur désactivation page", "err", 5200);
-          }
-        })();
-      }
-
-      function openLinkPageModal(page) {
-        var isEdit = !!page;
-        var fTitle = el("input", { class: "cag-input", type: "text", value: (page && page.title) || "", required: true, placeholder: "C&G - Liens utiles" });
-        var fSlug = el("input", { class: "cag-input", type: "text", value: (page && page.slug) || "", placeholder: "cag-liens-utiles" });
-        var fSubtitle = el("input", { class: "cag-input", type: "text", value: (page && page.subtitle) || "", placeholder: "Salle de jeux" });
-        var fEmail = el("input", { class: "cag-input", type: "email", value: (page && page.email) || "", placeholder: "contact@example.com" });
-        var fPhone = el("input", { class: "cag-input", type: "tel", value: (page && page.phone) || "", placeholder: "+33 ..." });
-        var fDesc = el("textarea", { class: "cag-input", rows: 3, value: (page && page.description) || "", placeholder: "Message affiché aux clients" });
-        var fActive = el("input", { type: "checkbox", checked: !page || page.isActive });
-        var linksWrap = el("div", { class: "cag-link-rows" });
-        var addLinkBtn = el("button", { class: "cag-btn", type: "button", text: "Ajouter un lien" });
-
-        function addLinkRow(link) {
-          link = link || {};
-          var kindSelect = el("select", { class: "cag-select cag-link-kind" });
-          linkKindOptions().forEach(function (opt) {
-            kindSelect.appendChild(el("option", { value: opt[0], text: opt[1] }));
-          });
-          kindSelect.value = link.kind || "instagram";
-          var labelInput = el("input", { class: "cag-input", type: "text", value: link.label || linkKindLabel(kindSelect.value), placeholder: "Libellé" });
-          var urlInput = el("input", { class: "cag-input", type: "url", value: link.url || "", placeholder: "https://..." });
-          var removeBtn = el("button", { class: "cag-btn cag-btn-danger", type: "button", text: "Retirer" });
-          var row = el("div", { class: "cag-link-row" }, kindSelect, labelInput, urlInput, removeBtn);
-
-          kindSelect.addEventListener("change", function () {
-            if (!labelInput.value.trim()) labelInput.value = linkKindLabel(kindSelect.value);
-          });
-          removeBtn.addEventListener("click", function () {
-            if (row && row.parentNode) row.parentNode.removeChild(row);
-          });
-          linksWrap.appendChild(row);
-        }
-
-        var existingLinks = page && page.links && page.links.length ? page.links : [];
-        existingLinks.forEach(addLinkRow);
-        if (!existingLinks.length) addLinkRow({ kind: "instagram", label: "Instagram", url: "" });
-        addLinkBtn.addEventListener("click", function () {
-          addLinkRow({ kind: "custom", label: "Lien", url: "" });
-        });
-
-        var form = el(
-          "form",
-          { class: "cag-form cag-link-page-form" },
-          el("div", { class: "cag-field cag-field-full" }, el("label", { text: "Nom de la page" }), fTitle),
-          el("div", { class: "cag-field" }, el("label", { text: "Slug public" }), fSlug),
-          el("div", { class: "cag-field" }, el("label", { text: "Sous-titre" }), fSubtitle),
-          el("div", { class: "cag-field" }, el("label", { text: "Email" }), fEmail),
-          el("div", { class: "cag-field" }, el("label", { text: "Téléphone" }), fPhone),
-          el("div", { class: "cag-field cag-field-full" }, el("label", { text: "Description" }), fDesc),
-          el("label", { class: "cag-check cag-field-full" }, fActive, el("div", {}, el("strong", { text: "Page active" }), el("div", { class: "cag-small", text: "Une page inactive ne répond plus aux QR codes publics." }))),
-          el("div", { class: "cag-field cag-field-full" }, el("label", { text: "Réseaux et liens utiles" }), linksWrap, addLinkBtn)
-        );
-
-        if (isEdit && page.publicUrl) {
-          form.appendChild(
-            el(
-              "div",
-              { class: "cag-copy-row cag-field-full" },
-              el("input", { class: "cag-input", type: "text", readonly: true, value: page.publicUrl }),
-              el("button", { class: "cag-btn", type: "button", text: "Copier" })
-            )
-          );
-        }
-
-        var formId = "cag-link-page-form-" + Date.now() + "-" + Math.floor(Math.random() * 100000);
-        form.setAttribute("id", formId);
-        var saveBtn = el("button", { class: "cag-btn cag-btn-primary", type: "submit", text: isEdit ? "Enregistrer" : "Créer" });
-        saveBtn.setAttribute("form", formId);
-        var qrBtn = el("button", { class: "cag-btn", type: "button", text: "Télécharger QR" });
-        var cancelBtn = el("button", { class: "cag-btn", type: "button", text: "Annuler" });
-        var actions = el("div", { class: "cag-form-actions" }, cancelBtn, isEdit ? qrBtn : null, saveBtn);
-
-        var modal = openModal(root, isEdit ? "Modifier page clients" : "Créer page clients", form, actions);
-        cancelBtn.addEventListener("click", modal.close);
-        if (!isEdit) qrBtn.style.display = "none";
-        qrBtn.addEventListener("click", function () {
-          downloadQr(page);
-        });
-        var copyRowBtn = $(".cag-copy-row .cag-btn", form);
-        if (copyRowBtn) {
-          copyRowBtn.addEventListener("click", function () {
-            copyText(page.publicUrl).then(function () {
-              toast(root, "Lien copié.", "ok");
-            });
-          });
-        }
-
-        form.addEventListener("submit", function (e) {
-          e.preventDefault();
-          (async function () {
-            setBusy(saveBtn, true, "Sauvegarde...");
-            try {
-              var links = $all(".cag-link-row", linksWrap)
-                .map(function (row) {
-                  var kind = $(".cag-link-kind", row).value;
-                  var inputs = $all(".cag-input", row);
-                  return {
-                    kind: kind,
-                    label: inputs[0] ? inputs[0].value.trim() : linkKindLabel(kind),
-                    url: inputs[1] ? inputs[1].value.trim() : "",
-                  };
-                })
-                .filter(function (x) {
-                  return !!x.url;
-                });
-
-              var payload = {
-                title: fTitle.value.trim(),
-                slug: fSlug.value.trim(),
-                subtitle: fSubtitle.value.trim(),
-                description: fDesc.value.trim(),
-                email: fEmail.value.trim(),
-                phone: fPhone.value.trim(),
-                links: links,
-                isActive: fActive.checked,
-              };
-              if (!payload.title) throw new Error("Nom de page requis");
-              if (!payload.email && !payload.phone && !links.length) throw new Error("Ajoute au moins un email, un téléphone ou un lien.");
-
-              if (isEdit) await updateLinkPage(cfg, page.id, payload);
-              else await createLinkPage(cfg, payload);
-              toast(root, isEdit ? "Page mise à jour." : "Page créée.", "ok");
-              modal.close();
-              run();
-            } catch (err) {
-              toast(root, (err && err.message) || "Erreur sauvegarde page", "err", 5200);
-            } finally {
-              setBusy(saveBtn, false, isEdit ? "Enregistrer" : "Créer");
-            }
-          })();
-        });
-      }
-
-      run();
-    }
-
     async function refreshAll() {
       setBusy(chrome.refreshBtn, true, "Rafraichit...");
       try {
@@ -2862,7 +2573,6 @@
         if (state.view === "sales") await refreshSales();
         if (state.view === "products") await refreshProducts();
         if (state.view === "offers") await refreshOffers();
-        if (state.view === "link-pages") await refreshLinkPages();
       } finally {
         setBusy(chrome.refreshBtn, false, "Rafraichir");
       }
@@ -2934,7 +2644,6 @@
       sales: null,
       products: null,
       offers: null,
-      linkPages: null,
       _productsAll: null,
     };
 
