@@ -28,6 +28,7 @@ const mysql = require("mysql2/promise");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const crypto = require("crypto");
+const QRCode = require("qrcode");
 const API_VERSION = "1.3.6";
 
 function env(name, fallback) {
@@ -200,6 +201,7 @@ let HAS_PASSWORD_HASH_COLUMN = false;
 let POS_SYNC_TABLE_READY = false;
 let PURCHASES_TABLE_READY = false;
 let BOXING_TABLES_READY = false;
+let LINK_PAGES_TABLE_READY = false;
 const USER_SCHEMA = new Set();
 const POS_SCHEMA = {
   sales: new Set(),
@@ -813,6 +815,227 @@ function sanitizeClientSaleUid(v) {
   return raw;
 }
 
+function escapeHtml(v) {
+  return String(v == null ? "" : v)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}
+
+function normalizeLinkPageSlug(v, fallback) {
+  const raw = sanitizeText(v, 120) || sanitizeText(fallback, 120);
+  const slug = raw
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 80)
+    .replace(/-+$/g, "");
+  return slug || "";
+}
+
+function sanitizePublicUrl(v) {
+  const raw = sanitizeText(v, 500);
+  if (!raw) return "";
+  try {
+    const url = new URL(raw);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return "";
+    return url.href.slice(0, 500);
+  } catch (_) {
+    return "";
+  }
+}
+
+function normalizeEmail(v) {
+  const email = sanitizeText(v, 190).toLowerCase();
+  if (!email) return "";
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) ? email : "";
+}
+
+function normalizePhone(v) {
+  const phone = sanitizeText(v, 80);
+  if (!phone) return "";
+  return /^[0-9+().\-\s]{6,80}$/.test(phone) ? phone : "";
+}
+
+function defaultLinkLabel(type) {
+  const key = sanitizeText(type, 40).toLowerCase();
+  const map = {
+    instagram: "Instagram",
+    facebook: "Facebook",
+    tiktok: "TikTok",
+    snapchat: "Snapchat",
+    youtube: "YouTube",
+    whatsapp: "WhatsApp",
+    linkedin: "LinkedIn",
+    website: "Site web",
+    maps: "Google Maps",
+  };
+  return map[key] || "Lien utile";
+}
+
+function parseLinkPageLinks(raw) {
+  if (Array.isArray(raw)) return raw;
+  if (raw == null || raw === "") return [];
+  if (typeof raw === "string") {
+    try {
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch (_) {
+      return [];
+    }
+  }
+  return [];
+}
+
+function normalizeLinkPageLinks(raw, errors) {
+  const source = parseLinkPageLinks(raw);
+  const out = [];
+  for (let i = 0; i < source.length && out.length < 12; i += 1) {
+    const item = source[i] || {};
+    const type = sanitizeText(item.type, 40).toLowerCase().replace(/[^a-z0-9_-]/g, "") || "link";
+    const label = sanitizeText(item.label, 80) || defaultLinkLabel(type);
+    const urlRaw = sanitizeText(item.url, 500);
+    if (!label && !urlRaw) continue;
+    const url = sanitizePublicUrl(urlRaw);
+    if (!url) {
+      if (urlRaw && errors) errors.push(`Lien #${i + 1}: URL invalide.`);
+      continue;
+    }
+    out.push({ type, label, url });
+  }
+  return out;
+}
+
+function normalizeLinkPagePayload(rawBody, existing) {
+  const b = Object.assign({}, existing || {}, rawBody || {});
+  const errors = [];
+  const title = sanitizeText(b.title, 160);
+  const slug = normalizeLinkPageSlug(b.slug, title);
+  const emailRaw = sanitizeText(b.email, 190);
+  const phoneRaw = sanitizeText(b.phone, 80);
+  const email = normalizeEmail(emailRaw);
+  const phone = normalizePhone(phoneRaw);
+  const links = normalizeLinkPageLinks(b.links != null ? b.links : b.links_json, errors);
+
+  if (!title) errors.push("Titre obligatoire.");
+  if (!slug) errors.push("Identifiant de page obligatoire.");
+  if (emailRaw && !email) errors.push("Email invalide.");
+  if (phoneRaw && !phone) errors.push("Numero de telephone invalide.");
+  if (!links.length && !email && !phone) errors.push("Ajoute au moins un lien, un email ou un numero de telephone.");
+
+  return {
+    errors,
+    data: {
+      slug,
+      title,
+      subtitle: sanitizeText(b.subtitle, 220),
+      description: sanitizeText(b.description, 1200),
+      email,
+      phone,
+      links,
+      isActive: normalizeActiveFlag(b.is_active != null ? b.is_active : b.isActive, true),
+    },
+  };
+}
+
+function getRequestBaseUrl(req) {
+  const configured = sanitizeText(process.env.PUBLIC_BASE_URL || "", 240).replace(/\/+$/g, "");
+  if (configured) return configured;
+  const protoHeader = req.headers && (req.headers["x-forwarded-proto"] || req.headers["x-forwarded-protocol"]);
+  const hostHeader = req.headers && (req.headers["x-forwarded-host"] || req.headers.host);
+  const proto = String(Array.isArray(protoHeader) ? protoHeader[0] : protoHeader || "https").split(",")[0].trim() || "https";
+  const host = String(Array.isArray(hostHeader) ? hostHeader[0] : hostHeader || "cag.mybusinesslife.fr").split(",")[0].trim();
+  return `${proto}://${host}`.replace(/\/+$/g, "");
+}
+
+function linkPagePublicUrl(req, slug) {
+  return `${getRequestBaseUrl(req)}/l/${encodeURIComponent(slug)}`;
+}
+
+function linkPageQrUrl(req, slug) {
+  return `${getRequestBaseUrl(req)}/qr/${encodeURIComponent(slug)}.png`;
+}
+
+function rowToLinkPage(row, req) {
+  const slug = row.slug || "";
+  return {
+    id: Number(row.id_link_page || row.id || 0),
+    slug,
+    title: row.title || "",
+    subtitle: row.subtitle || "",
+    description: row.description || "",
+    email: row.email || "",
+    phone: row.phone || "",
+    links: normalizeLinkPageLinks(row.links_json || [], []),
+    isActive: Number(row.is_active) === 1,
+    createdBy: row.created_by == null ? null : Number(row.created_by),
+    updatedBy: row.updated_by == null ? null : Number(row.updated_by),
+    createdAt: row.created_at || null,
+    updatedAt: row.updated_at || null,
+    publicUrl: linkPagePublicUrl(req, slug),
+    qrUrl: linkPageQrUrl(req, slug),
+  };
+}
+
+function renderPublicLinkPage(page) {
+  const links = Array.isArray(page.links) ? page.links : [];
+  const contactLinks = [];
+  if (page.email) contactLinks.push({ label: "Email", url: `mailto:${page.email}` });
+  if (page.phone) contactLinks.push({ label: "Telephone", url: `tel:${page.phone.replace(/\s+/g, "")}` });
+  const usefulLinksHtml = links.map((link) => (
+    `<a class="link-button" href="${escapeHtml(link.url)}" target="_blank" rel="noopener noreferrer">` +
+    `<span>${escapeHtml(link.label)}</span><small>${escapeHtml(defaultLinkLabel(link.type))}</small></a>`
+  )).join("");
+  const contactHtml = contactLinks.map((link) => (
+    `<a class="contact-link" href="${escapeHtml(link.url)}">${escapeHtml(link.label)}</a>`
+  )).join("");
+
+  return `<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>${escapeHtml(page.title)}</title>
+    <meta name="description" content="${escapeHtml(page.subtitle || page.description || page.title)}" />
+    <style>
+      :root { color-scheme: light; --ink:#07130f; --muted:#52635d; --line:#dbe8e2; --accent:#18b89d; --accent2:#62d68d; }
+      * { box-sizing:border-box; }
+      body { margin:0; min-height:100vh; font-family:Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color:var(--ink); background:#f6fbf8; display:grid; place-items:center; padding:22px; }
+      main { width:min(560px,100%); }
+      .brand { display:grid; gap:10px; justify-items:center; text-align:center; margin-bottom:24px; }
+      .mark { width:74px; height:74px; border-radius:22px; display:grid; place-items:center; font-weight:950; color:#03120d; background:linear-gradient(135deg,var(--accent),var(--accent2)); box-shadow:0 18px 48px rgba(24,184,157,.22); }
+      h1 { margin:0; font-size:clamp(32px,8vw,54px); line-height:1; letter-spacing:0; }
+      p { margin:0; color:var(--muted); line-height:1.55; }
+      .links { display:grid; gap:12px; }
+      .link-button { display:flex; justify-content:space-between; align-items:center; gap:14px; min-height:64px; padding:15px 17px; border:1px solid var(--line); border-radius:18px; text-decoration:none; color:var(--ink); background:#fff; box-shadow:0 14px 38px rgba(7,19,15,.07); }
+      .link-button span { font-weight:900; }
+      .link-button small { color:var(--accent); font-weight:800; }
+      .contact { display:flex; justify-content:center; gap:10px; flex-wrap:wrap; margin-top:18px; }
+      .contact-link { border:1px solid var(--line); border-radius:999px; padding:10px 14px; color:var(--ink); text-decoration:none; background:#fff; font-weight:850; }
+      .description { margin:18px 0 0; padding:16px; border:1px solid var(--line); border-radius:18px; background:rgba(255,255,255,.72); white-space:pre-wrap; }
+      footer { margin-top:26px; text-align:center; color:#789088; font-size:12px; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <section class="brand">
+        <div class="mark">CAG</div>
+        <h1>${escapeHtml(page.title)}</h1>
+        ${page.subtitle ? `<p>${escapeHtml(page.subtitle)}</p>` : ""}
+      </section>
+      <section class="links">${usefulLinksHtml || ""}</section>
+      ${contactHtml ? `<section class="contact">${contactHtml}</section>` : ""}
+      ${page.description ? `<p class="description">${escapeHtml(page.description)}</p>` : ""}
+      <footer>Come & Game</footer>
+    </main>
+  </body>
+</html>`;
+}
+
 function parseNumericIdList(raw) {
   if (Array.isArray(raw)) {
     return raw.map(Number).filter((x) => Number.isFinite(x) && x > 0);
@@ -1069,6 +1292,73 @@ async function ensurePurchasesTable(connOrPool) {
   PURCHASES_TABLE_READY = true;
 }
 
+async function ensureLinkPagesTable(connOrPool) {
+  if (LINK_PAGES_TABLE_READY) return;
+  const db = connOrPool || pool;
+  await db.query(
+    `CREATE TABLE IF NOT EXISTS cag_link_pages (
+      id_link_page BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+      slug VARCHAR(80) NOT NULL,
+      title VARCHAR(160) NOT NULL,
+      subtitle VARCHAR(220) NULL,
+      description TEXT NULL,
+      email VARCHAR(190) NULL,
+      phone VARCHAR(80) NULL,
+      links_json MEDIUMTEXT NULL,
+      is_active TINYINT(1) NOT NULL DEFAULT 1,
+      created_by BIGINT UNSIGNED NULL,
+      updated_by BIGINT UNSIGNED NULL,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (id_link_page),
+      UNIQUE KEY ux_cag_link_pages_slug (slug),
+      KEY idx_cag_link_pages_active (is_active),
+      KEY idx_cag_link_pages_updated (updated_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`
+  );
+  LINK_PAGES_TABLE_READY = true;
+}
+
+async function getLinkPageById(id, req) {
+  await ensureLinkPagesTable();
+  const [rows] = await pool.query(
+    `SELECT id_link_page, slug, title, subtitle, description, email, phone, links_json, is_active, created_by, updated_by, created_at, updated_at
+     FROM cag_link_pages
+     WHERE id_link_page = ?
+     LIMIT 1`,
+    [id]
+  );
+  return rows && rows[0] ? rowToLinkPage(rows[0], req) : null;
+}
+
+async function getLinkPageBySlug(slug, req, includeInactive) {
+  await ensureLinkPagesTable();
+  const [rows] = await pool.query(
+    `SELECT id_link_page, slug, title, subtitle, description, email, phone, links_json, is_active, created_by, updated_by, created_at, updated_at
+     FROM cag_link_pages
+     WHERE slug = ? ${includeInactive ? "" : "AND is_active = 1"}
+     LIMIT 1`,
+    [slug]
+  );
+  return rows && rows[0] ? rowToLinkPage(rows[0], req) : null;
+}
+
+async function sendQrPng(reply, url, slug, download) {
+  const png = await QRCode.toBuffer(url, {
+    type: "png",
+    width: 1400,
+    margin: 1,
+    errorCorrectionLevel: "M",
+    color: {
+      dark: "#000000",
+      light: "#0000",
+    },
+  });
+  reply.header("Cache-Control", "no-store");
+  if (download) reply.header("Content-Disposition", `attachment; filename="qrcode-${slug}.png"`);
+  reply.type("image/png").send(png);
+}
+
 async function reserveClientSaleUid(conn, sale, userId) {
   if (!sale.clientSaleUid) return { duplicate: false, existingSaleId: null };
   await ensurePosSyncTable(conn);
@@ -1259,6 +1549,204 @@ fastify.get(CFG.apiPrefix + "/health", async () => {
     now: new Date().toISOString(),
   };
 });
+
+async function handlePublicLinkPage(req, reply) {
+  const slug = normalizeLinkPageSlug(req.params && req.params.slug, "");
+  if (!slug) return sendError(reply, 404, "Not found");
+  const page = await getLinkPageBySlug(slug, req, false);
+  if (!page) return sendError(reply, 404, "Not found");
+  reply.header("Cache-Control", "public, max-age=120");
+  reply.type("text/html; charset=utf-8").send(renderPublicLinkPage(page));
+}
+
+fastify.get("/l/:slug", handlePublicLinkPage);
+fastify.get("/links/:slug", handlePublicLinkPage);
+
+fastify.get("/qr/:slug", async (req, reply) => {
+  const rawSlug = String((req.params && req.params.slug) || "").replace(/\.png$/i, "");
+  const slug = normalizeLinkPageSlug(rawSlug, "");
+  if (!slug) return sendError(reply, 404, "Not found");
+  const page = await getLinkPageBySlug(slug, req, false);
+  if (!page) return sendError(reply, 404, "Not found");
+  return sendQrPng(reply, page.publicUrl, page.slug, false);
+});
+
+fastify.get(
+  CFG.apiPrefix + "/link-pages",
+  {
+    preHandler: requireAuth,
+  },
+  async (req) => {
+    await ensureLinkPagesTable();
+    const q = sanitizeText(req.query && req.query.q, 120);
+    const limit = clampInt(req.query && req.query.limit, 1, 100, 25);
+    const offset = clampInt(req.query && req.query.offset, 0, 100000, 0);
+    const values = [];
+    let where = "";
+    if (q) {
+      where = "WHERE title LIKE ? OR slug LIKE ? OR email LIKE ? OR phone LIKE ?";
+      const like = `%${q}%`;
+      values.push(like, like, like, like);
+    }
+    const [totalRows] = await pool.query(`SELECT COUNT(*) AS total FROM cag_link_pages ${where}`, values);
+    const [rows] = await pool.query(
+      `SELECT id_link_page, slug, title, subtitle, description, email, phone, links_json, is_active, created_by, updated_by, created_at, updated_at
+       FROM cag_link_pages
+       ${where}
+       ORDER BY updated_at DESC, id_link_page DESC
+       LIMIT ? OFFSET ?`,
+      values.concat([limit, offset])
+    );
+    return {
+      total: Number(totalRows && totalRows[0] && totalRows[0].total || 0),
+      items: (rows || []).map((row) => rowToLinkPage(row, req)),
+    };
+  }
+);
+
+fastify.post(
+  CFG.apiPrefix + "/link-pages",
+  {
+    preHandler: [requireAuth, requireWrite],
+  },
+  async (req, reply) => {
+    await ensureLinkPagesTable();
+    const normalized = normalizeLinkPagePayload(getRequestPayloadObject(req), null);
+    if (normalized.errors.length) return sendError(reply, 400, "Invalid link page", { hint: normalized.errors.join(" ") });
+    const p = normalized.data;
+    const conn = await getConnectionWithTimeout(4000);
+    try {
+      const [res] = await queryWithTimeout(
+        conn,
+        `INSERT INTO cag_link_pages (slug, title, subtitle, description, email, phone, links_json, is_active, created_by, updated_by)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          p.slug,
+          p.title,
+          p.subtitle || null,
+          p.description || null,
+          p.email || null,
+          p.phone || null,
+          JSON.stringify(p.links),
+          p.isActive,
+          req.cagUser && req.cagUser.id_user || null,
+          req.cagUser && req.cagUser.id_user || null,
+        ],
+        8000
+      );
+      const created = await getLinkPageById(res.insertId, req);
+      reply.code(201).send({ ok: true, item: created });
+    } catch (e) {
+      const handled = handleDbWriteError(req, reply, e, "create-link-page");
+      if (handled !== false) return handled;
+      throw e;
+    } finally {
+      try {
+        conn.release();
+      } catch (_) {
+        // ignore
+      }
+    }
+  }
+);
+
+fastify.patch(
+  CFG.apiPrefix + "/link-pages/:id",
+  {
+    preHandler: [requireAuth, requireWrite],
+  },
+  async (req, reply) => {
+    const id = /^\d+$/.test(String(req.params && req.params.id)) ? Number(req.params.id) : null;
+    if (!id) return sendError(reply, 400, "Invalid id");
+    const existing = await getLinkPageById(id, req);
+    if (!existing) return sendError(reply, 404, "Not found");
+    const normalized = normalizeLinkPagePayload(getRequestPayloadObject(req), existing);
+    if (normalized.errors.length) return sendError(reply, 400, "Invalid link page", { hint: normalized.errors.join(" ") });
+    const p = normalized.data;
+    const conn = await getConnectionWithTimeout(4000);
+    try {
+      const [res] = await queryWithTimeout(
+        conn,
+        `UPDATE cag_link_pages
+         SET slug = ?, title = ?, subtitle = ?, description = ?, email = ?, phone = ?, links_json = ?, is_active = ?, updated_by = ?
+         WHERE id_link_page = ?`,
+        [
+          p.slug,
+          p.title,
+          p.subtitle || null,
+          p.description || null,
+          p.email || null,
+          p.phone || null,
+          JSON.stringify(p.links),
+          p.isActive,
+          req.cagUser && req.cagUser.id_user || null,
+          id,
+        ],
+        8000
+      );
+      if (!res.affectedRows) return sendError(reply, 404, "Not found");
+      const updated = await getLinkPageById(id, req);
+      reply.send({ ok: true, item: updated });
+    } catch (e) {
+      const handled = handleDbWriteError(req, reply, e, "update-link-page");
+      if (handled !== false) return handled;
+      throw e;
+    } finally {
+      try {
+        conn.release();
+      } catch (_) {
+        // ignore
+      }
+    }
+  }
+);
+
+fastify.delete(
+  CFG.apiPrefix + "/link-pages/:id",
+  {
+    preHandler: [requireAuth, requireWrite],
+  },
+  async (req, reply) => {
+    const id = /^\d+$/.test(String(req.params && req.params.id)) ? Number(req.params.id) : null;
+    if (!id) return sendError(reply, 400, "Invalid id");
+    await ensureLinkPagesTable();
+    const [res] = await pool.query(
+      `UPDATE cag_link_pages SET is_active = 0, updated_by = ? WHERE id_link_page = ?`,
+      [req.cagUser && req.cagUser.id_user || null, id]
+    );
+    if (!res.affectedRows) return sendError(reply, 404, "Not found");
+    const item = await getLinkPageById(id, req);
+    return { ok: true, item };
+  }
+);
+
+fastify.get(
+  CFG.apiPrefix + "/link-pages/:id/qr",
+  {
+    preHandler: [requireAuth, requireWrite],
+  },
+  async (req, reply) => {
+    const id = /^\d+$/.test(String(req.params && req.params.id)) ? Number(req.params.id) : null;
+    if (!id) return sendError(reply, 400, "Invalid id");
+    const page = await getLinkPageById(id, req);
+    if (!page) return sendError(reply, 404, "Not found");
+    return sendQrPng(reply, page.publicUrl, page.slug, true);
+  }
+);
+
+fastify.get(
+  CFG.apiPrefix + "/link-pages/:id/qr.png",
+  {
+    preHandler: [requireAuth, requireWrite],
+  },
+  async (req, reply) => {
+    const id = /^\d+$/.test(String(req.params && req.params.id)) ? Number(req.params.id) : null;
+    if (!id) return sendError(reply, 400, "Invalid id");
+    const page = await getLinkPageById(id, req);
+    if (!page) return sendError(reply, 404, "Not found");
+    return sendQrPng(reply, page.publicUrl, page.slug, true);
+  }
+);
 
 fastify.get(
   CFG.apiPrefix + "/debug/write-access",
@@ -4212,6 +4700,12 @@ async function main() {
     fastify.log.info("Boxing machines schema ready");
   } catch (e) {
     fastify.log.warn({ err: e }, "Boxing machines schema setup failed; boxing endpoints will retry on demand");
+  }
+  try {
+    await ensureLinkPagesTable(pool);
+    fastify.log.info("Link pages schema ready");
+  } catch (e) {
+    fastify.log.warn({ err: e }, "Link pages schema setup failed; link page endpoints will retry on demand");
   }
   fastify.log.info(
     {
