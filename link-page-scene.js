@@ -24,7 +24,7 @@ if (canvas && !reducedMotion) {
   const artworks = [
     { url: "/assets/game-room/art-01.webp", aspect: 1.63, x: -7.1, y: 3.15, z: -5.8, size: 3.25, ry: 0.28 },
     { url: "/assets/game-room/art-02.webp", aspect: 1.63, x: 7.0, y: 2.7, z: -6.1, size: 3.28, ry: -0.3 },
-    { url: "/assets/game-room/art-03.webp", aspect: 0.72, x: -7.9, y: -1.85, z: -6.7, size: 3.85, ry: 0.22 },
+    { url: "/assets/game-room/art-03.png", aspect: 0.72, x: -7.9, y: -1.85, z: -6.7, size: 3.85, ry: 0.22, cutout: true },
     { url: "/assets/game-room/art-04.webp", aspect: 1.78, x: 7.6, y: -2.25, z: -6.8, size: 3.2, ry: -0.24 },
     { url: "/assets/game-room/art-05.webp", aspect: 1.67, x: -2.2, y: 5.15, z: -8.4, size: 3.1, ry: 0.08 },
     { url: "/assets/game-room/art-06.webp", aspect: 0.72, x: 2.6, y: -5.05, z: -8.2, size: 4.3, ry: -0.08 },
@@ -40,30 +40,34 @@ if (canvas && !reducedMotion) {
     const material = new THREE.MeshBasicMaterial({
       color: 0xffffff,
       transparent: true,
-      opacity: 0.72,
+      opacity: 0,
       side: THREE.DoubleSide,
       depthWrite: false,
+      alphaTest: artwork.cutout ? 0.03 : 0,
     });
     const plane = new THREE.Mesh(new THREE.PlaneGeometry(width, height), material);
     group.add(plane);
 
-    const glow = new THREE.Mesh(
-      new THREE.PlaneGeometry(width + 0.18, height + 0.18),
-      new THREE.MeshBasicMaterial({
-        color: index % 2 ? 0x24e5ff : 0xff4d9d,
-        transparent: true,
-        opacity: 0.07,
-        side: THREE.DoubleSide,
-        depthWrite: false,
-      })
-    );
-    glow.position.z = -0.03;
-    group.add(glow);
+    if (!artwork.cutout) {
+      const glow = new THREE.Mesh(
+        new THREE.PlaneGeometry(width + 0.18, height + 0.18),
+        new THREE.MeshBasicMaterial({
+          color: index % 2 ? 0x24e5ff : 0xff4d9d,
+          transparent: true,
+          opacity: 0.07,
+          side: THREE.DoubleSide,
+          depthWrite: false,
+        })
+      );
+      glow.position.z = -0.03;
+      group.add(glow);
+    }
 
     textureLoader.load(artwork.url, (texture) => {
       texture.colorSpace = THREE.SRGBColorSpace;
       texture.anisotropy = Math.min(renderer.capabilities.getMaxAnisotropy(), 8);
       material.map = texture;
+      material.opacity = artwork.cutout ? 0.9 : 0.72;
       material.needsUpdate = true;
     });
 

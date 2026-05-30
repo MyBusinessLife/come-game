@@ -285,6 +285,7 @@ const LINK_PAGE_ASSET_PATHS = {
 const GAME_ROOM_ASSET_NAMES = new Set([
   "art-01.webp",
   "art-02.webp",
+  "art-03.png",
   "art-03.webp",
   "art-04.webp",
   "art-05.webp",
@@ -358,7 +359,7 @@ fastify.get("/assets/game-room/:file", async (req, reply) => {
   const p = resolveAsset(path.join("link-page-assets", "game-room", file));
   if (!p) return sendError(reply, 404, "Game room asset not found");
   reply.header("Cache-Control", "public, max-age=86400");
-  reply.type("image/webp").send(fs.readFileSync(p));
+  reply.type(file.endsWith(".png") ? "image/png" : "image/webp").send(fs.readFileSync(p));
 });
 
 function sendError(reply, status, message, extra) {
