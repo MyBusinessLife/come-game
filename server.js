@@ -1191,8 +1191,8 @@ function renderPublicLinkPage(page) {
         width:100%;
         height:100%;
         display:block;
-        opacity:.58;
-        filter:saturate(1.1) contrast(1.02);
+        opacity:.76;
+        filter:saturate(1.08) contrast(1.03);
       }
       .page {
         position:relative;
