@@ -1,7 +1,7 @@
 (function () {
   "use strict";
 
-  var APP_VERSION = "3.6.0";
+  var APP_VERSION = "3.7.0";
   var STORAGE_KEY = "cag_admin_v2_auth";
   var LOCALE = "fr-DZ";
   var CURRENCY = "DZD";
@@ -22,6 +22,10 @@
     { value: "whatsapp", label: "WhatsApp" },
     { value: "maps", label: "Google Maps" },
     { value: "website", label: "Site web" },
+  ];
+  var PAGE_TYPE_OPTIONS = [
+    { value: "standard", label: "Standard" },
+    { value: "game_room", label: "Salle de jeu" },
   ];
   var API_ROOT = "/api";
   var LOGIN_URL = "/login";
@@ -478,6 +482,7 @@
     return {
       id: Number(p.id || p.id_link_page || 0),
       slug: p.slug || "",
+      pageType: p.pageType || p.page_type || "standard",
       title: p.title || "",
       subtitle: p.subtitle || "",
       description: p.description || "",
@@ -498,6 +503,17 @@
 
   function roleLabel(value) {
     return roleInfo(value).label;
+  }
+
+  function pageTypeLabel(value) {
+    var found = PAGE_TYPE_OPTIONS.find(function (x) { return x.value === value; });
+    return found ? found.label : "Standard";
+  }
+
+  function pageTypeOptions(selected) {
+    return PAGE_TYPE_OPTIONS.map(function (option) {
+      return '<option value="' + escapeHtml(option.value) + '"' + (String(selected || "standard") === option.value ? ' selected' : '') + '>' + escapeHtml(option.label) + '</option>';
+    }).join('');
   }
 
   function currentUserRoleTokens() {
@@ -1139,6 +1155,7 @@
       }
       return {
         page: '<strong>' + escapeHtml(p.title) + '</strong><small>/' + escapeHtml(p.slug) + '</small>',
+        type: '<span class="badge">' + escapeHtml(pageTypeLabel(p.pageType)) + '</span>',
         contact: '<span>' + escapeHtml(p.email || '-') + '</span><small>' + escapeHtml(p.phone || '') + '</small>',
         links: '<span class="badge">' + linksCount + ' lien(s)</span>',
         status: p.isActive ? '<span class="badge positive">Active</span>' : '<span class="badge negative">Desactivee</span>',
@@ -1148,6 +1165,7 @@
     });
     els.linkPagesTable.innerHTML = tableHtml([
       { key: "page", label: "Page" },
+      { key: "type", label: "Type" },
       { key: "contact", label: "Contact" },
       { key: "links", label: "Liens" },
       { key: "status", label: "Statut" },
@@ -1433,8 +1451,9 @@
     var html = '<div class="form-grid two link-page-form">' +
       field('Nom de la page *', 'title', item && item.title, 'text', 'required placeholder="Come & Game"') +
       field('Slug URL', 'slug', item && item.slug, 'text', 'placeholder="come-and-game"') +
-      field('Sous-titre', 'subtitle', item && item.subtitle, 'text', 'placeholder="Reseaux sociaux et contact"') +
+      '<label class="field"><span>Type de page</span><select name="pageType">' + pageTypeOptions(item && item.pageType) + '</select></label>' +
       '<label class="field"><span>Statut</span><select name="isActive"><option value="1"' + (!item || item.isActive ? ' selected' : '') + '>Active</option><option value="0"' + (item && !item.isActive ? ' selected' : '') + '>Desactivee</option></select></label>' +
+      field('Sous-titre', 'subtitle', item && item.subtitle, 'text', 'placeholder="Reseaux sociaux et contact"') +
       field('Email', 'email', item && item.email, 'email', 'placeholder="contact@example.com"') +
       field('Telephone', 'phone', item && item.phone, 'tel', 'placeholder="+213..."') +
       '<label class="field full"><span>Description</span><textarea name="description" rows="4" placeholder="Texte optionnel visible sur la page client">' + escapeHtml(item && item.description || '') + '</textarea></label>' +
@@ -1456,6 +1475,7 @@
       var payload = {
         title: fields.title.value.trim(),
         slug: fields.slug.value.trim(),
+        pageType: fields.pageType.value,
         subtitle: fields.subtitle.value.trim(),
         description: fields.description.value,
         email: fields.email.value.trim(),

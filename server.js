@@ -203,6 +203,7 @@ let PURCHASES_TABLE_READY = false;
 let BOXING_TABLES_READY = false;
 let LINK_PAGES_TABLE_READY = false;
 const USER_SCHEMA = new Set();
+const LINK_PAGES_SCHEMA = new Set();
 const POS_SCHEMA = {
   sales: new Set(),
   salesDetails: new Set(),
@@ -277,6 +278,11 @@ const ADMIN_V2_ASSET_PATHS = {
   css: resolveAsset("admin-v2/app.css"),
 };
 
+const LINK_PAGE_ASSET_PATHS = {
+  scene: resolveAsset("link-page-scene.js"),
+  three: resolveAsset("node_modules/three/build/three.module.min.js"),
+};
+
 function sendAsset(reply, kind) {
   const p = ASSET_PATHS[kind];
   if (!p) return sendError(reply, 404, "Asset not found", { kind });
@@ -327,6 +333,17 @@ fastify.get("/dashboard", async (_req, reply) => sendAdminV2Asset(reply, "index"
 fastify.get("/dashboard/", async (_req, reply) => sendAdminV2Asset(reply, "index"));
 fastify.get("/login", async (_req, reply) => sendAdminV2Asset(reply, "login"));
 fastify.get("/login/", async (_req, reply) => sendAdminV2Asset(reply, "login"));
+
+function sendLinkPageAsset(reply, kind) {
+  const p = LINK_PAGE_ASSET_PATHS[kind];
+  if (!p) return sendError(reply, 404, "Link page asset not found", { kind });
+  const buf = fs.readFileSync(p);
+  reply.header("Cache-Control", "public, max-age=86400");
+  reply.type("application/javascript; charset=utf-8").send(buf);
+}
+
+fastify.get("/assets/link-page-scene.js", async (_req, reply) => sendLinkPageAsset(reply, "scene"));
+fastify.get("/assets/three.module.min.js", async (_req, reply) => sendLinkPageAsset(reply, "three"));
 
 function sendError(reply, status, message, extra) {
   reply.code(status).send(Object.assign({ message }, extra || {}));
@@ -861,6 +878,19 @@ function normalizePhone(v) {
   return /^[0-9+().\-\s]{6,80}$/.test(phone) ? phone : "";
 }
 
+function normalizePageType(v) {
+  const raw = sanitizeText(v, 60).toLowerCase().replace(/[^a-z0-9_-]/g, "_");
+  const map = {
+    standard: "standard",
+    default: "standard",
+    game_room: "game_room",
+    salle_de_jeu: "game_room",
+    salle_jeu: "game_room",
+    arcade: "game_room",
+  };
+  return map[raw] || "standard";
+}
+
 function defaultLinkLabel(type) {
   const key = sanitizeText(type, 40).toLowerCase();
   const map = {
@@ -931,6 +961,7 @@ function normalizeLinkPagePayload(rawBody, existing) {
     errors,
     data: {
       slug,
+      pageType: normalizePageType(b.pageType != null ? b.pageType : b.page_type),
       title,
       subtitle: sanitizeText(b.subtitle, 220),
       description: sanitizeText(b.description, 1200),
@@ -965,6 +996,7 @@ function rowToLinkPage(row, req) {
   return {
     id: Number(row.id_link_page || row.id || 0),
     slug,
+    pageType: normalizePageType(row.page_type),
     title: row.title || "",
     subtitle: row.subtitle || "",
     description: row.description || "",
@@ -1063,6 +1095,10 @@ function renderPublicLinkPage(page) {
     `<a class="contact-pill" href="${escapeHtml(link.url)}">${contactIcon(link.type)}<span><strong>${escapeHtml(link.label)}</strong><small>${escapeHtml(link.value)}</small></span></a>`
   )).join("");
   const linkCountLabel = links.length > 1 ? `${links.length} liens utiles` : links.length === 1 ? "1 lien utile" : "Contact direct";
+  const isGameRoom = page.pageType === "game_room";
+  const bodyClass = isGameRoom ? ' class="theme-game-room"' : "";
+  const sceneHtml = isGameRoom ? '<div class="game-room-scene" aria-hidden="true"><canvas id="game-room-canvas"></canvas></div>' : "";
+  const sceneScript = isGameRoom ? '<script type="module" src="/assets/link-page-scene.js"></script>' : "";
 
   return `<!doctype html>
 <html lang="fr">
@@ -1104,17 +1140,59 @@ function renderPublicLinkPage(page) {
         position:fixed;
         inset:0;
         pointer-events:none;
+        z-index:0;
         background:linear-gradient(120deg, transparent 15%, rgba(19,185,159,.1) 38%, transparent 62%, rgba(217,183,111,.12) 84%, transparent);
         opacity:.75;
         animation:ambientSweep 9s ease-in-out infinite alternate;
       }
+      .theme-game-room {
+        background:
+          radial-gradient(circle at 20% 8%, rgba(44, 214, 255, .2), transparent 34%),
+          radial-gradient(circle at 82% 18%, rgba(255, 61, 151, .16), transparent 32%),
+          linear-gradient(145deg, #07110d 0%, #0d1714 42%, #08100d 100%);
+        color:#f8fff9;
+      }
+      .theme-game-room::before {
+        background:linear-gradient(120deg, rgba(255,255,255,.04), rgba(19,185,159,.08), rgba(255,255,255,.04));
+        opacity:.9;
+      }
+      .theme-game-room::after {
+        content:"";
+        position:fixed;
+        inset:0;
+        z-index:1;
+        pointer-events:none;
+        background:radial-gradient(circle at center, rgba(255,255,255,.16), rgba(255,255,255,.08) 42%, rgba(7,17,13,.42) 100%);
+      }
+      .game-room-scene {
+        position:fixed;
+        inset:0;
+        z-index:0;
+        pointer-events:none;
+        overflow:hidden;
+      }
+      .game-room-scene canvas {
+        width:100%;
+        height:100%;
+        display:block;
+        opacity:.58;
+        filter:saturate(1.1) contrast(1.02);
+      }
       .page {
         position:relative;
-        z-index:1;
+        z-index:2;
         width:min(720px,100%);
         display:grid;
         gap:24px;
         animation:pageIn .7s cubic-bezier(.2,.8,.2,1) both;
+      }
+      .theme-game-room .page {
+        padding:22px;
+        border:1px solid rgba(255,255,255,.14);
+        border-radius:38px;
+        background:linear-gradient(145deg, rgba(255,255,255,.9), rgba(246,255,250,.78));
+        box-shadow:0 36px 110px rgba(0,0,0,.34);
+        backdrop-filter:blur(18px);
       }
       .brand {
         display:grid;
@@ -1290,6 +1368,8 @@ function renderPublicLinkPage(page) {
       }
       @media (max-width:680px) {
         body { padding:24px 12px; place-items:start center; }
+        .theme-game-room { padding:12px; }
+        .theme-game-room .page { padding:18px; border-radius:30px; }
         .page { gap:18px; }
         .brand { gap:11px; }
         .brand-mark { width:74px; height:74px; border-radius:24px; }
@@ -1305,6 +1385,7 @@ function renderPublicLinkPage(page) {
       @media (prefers-reduced-motion:reduce) {
         *, *::before, *::after { animation:none !important; transition:none !important; }
         .link-card { opacity:1; transform:none; }
+        .game-room-scene { display:none; }
       }
       @keyframes pageIn { from { opacity:0; transform:translateY(18px); } to { opacity:1; transform:translateY(0); } }
       @keyframes cardIn { to { opacity:1; transform:translateY(0); } }
@@ -1313,7 +1394,8 @@ function renderPublicLinkPage(page) {
       @keyframes ambientSweep { from { transform:translateX(-2%); } to { transform:translateX(2%); } }
     </style>
   </head>
-  <body>
+  <body${bodyClass}>
+    ${sceneHtml}
     <main class="page">
       <section class="brand">
         <div class="brand-mark">CAG</div>
@@ -1326,6 +1408,7 @@ function renderPublicLinkPage(page) {
       ${contactHtml ? `<section class="contact">${contactHtml}</section>` : ""}
       <footer>Come & Game</footer>
     </main>
+    ${sceneScript}
   </body>
 </html>`;
 }
@@ -1593,6 +1676,7 @@ async function ensureLinkPagesTable(connOrPool) {
     `CREATE TABLE IF NOT EXISTS cag_link_pages (
       id_link_page BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
       slug VARCHAR(80) NOT NULL,
+      page_type VARCHAR(60) NOT NULL DEFAULT 'standard',
       title VARCHAR(160) NOT NULL,
       subtitle VARCHAR(220) NULL,
       description TEXT NULL,
@@ -1610,13 +1694,20 @@ async function ensureLinkPagesTable(connOrPool) {
       KEY idx_cag_link_pages_updated (updated_at)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`
   );
+  const cols = await loadColumns("cag_link_pages");
+  LINK_PAGES_SCHEMA.clear();
+  cols.forEach((col) => LINK_PAGES_SCHEMA.add(col));
+  if (!LINK_PAGES_SCHEMA.has("page_type")) {
+    await db.query(`ALTER TABLE cag_link_pages ADD COLUMN page_type VARCHAR(60) NOT NULL DEFAULT 'standard' AFTER slug`);
+    LINK_PAGES_SCHEMA.add("page_type");
+  }
   LINK_PAGES_TABLE_READY = true;
 }
 
 async function getLinkPageById(id, req) {
   await ensureLinkPagesTable();
   const [rows] = await pool.query(
-    `SELECT id_link_page, slug, title, subtitle, description, email, phone, links_json, is_active, created_by, updated_by, created_at, updated_at
+    `SELECT id_link_page, slug, page_type, title, subtitle, description, email, phone, links_json, is_active, created_by, updated_by, created_at, updated_at
      FROM cag_link_pages
      WHERE id_link_page = ?
      LIMIT 1`,
@@ -1628,7 +1719,7 @@ async function getLinkPageById(id, req) {
 async function getLinkPageBySlug(slug, req, includeInactive) {
   await ensureLinkPagesTable();
   const [rows] = await pool.query(
-    `SELECT id_link_page, slug, title, subtitle, description, email, phone, links_json, is_active, created_by, updated_by, created_at, updated_at
+    `SELECT id_link_page, slug, page_type, title, subtitle, description, email, phone, links_json, is_active, created_by, updated_by, created_at, updated_at
      FROM cag_link_pages
      WHERE slug = ? ${includeInactive ? "" : "AND is_active = 1"}
      LIMIT 1`,
@@ -1878,13 +1969,13 @@ fastify.get(
     const values = [];
     let where = "";
     if (q) {
-      where = "WHERE title LIKE ? OR slug LIKE ? OR email LIKE ? OR phone LIKE ?";
+      where = "WHERE title LIKE ? OR slug LIKE ? OR page_type LIKE ? OR email LIKE ? OR phone LIKE ?";
       const like = `%${q}%`;
-      values.push(like, like, like, like);
+      values.push(like, like, like, like, like);
     }
     const [totalRows] = await pool.query(`SELECT COUNT(*) AS total FROM cag_link_pages ${where}`, values);
     const [rows] = await pool.query(
-      `SELECT id_link_page, slug, title, subtitle, description, email, phone, links_json, is_active, created_by, updated_by, created_at, updated_at
+      `SELECT id_link_page, slug, page_type, title, subtitle, description, email, phone, links_json, is_active, created_by, updated_by, created_at, updated_at
        FROM cag_link_pages
        ${where}
        ORDER BY updated_at DESC, id_link_page DESC
@@ -1912,10 +2003,11 @@ fastify.post(
     try {
       const [res] = await queryWithTimeout(
         conn,
-        `INSERT INTO cag_link_pages (slug, title, subtitle, description, email, phone, links_json, is_active, created_by, updated_by)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO cag_link_pages (slug, page_type, title, subtitle, description, email, phone, links_json, is_active, created_by, updated_by)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           p.slug,
+          p.pageType,
           p.title,
           p.subtitle || null,
           p.description || null,
@@ -1962,10 +2054,11 @@ fastify.patch(
       const [res] = await queryWithTimeout(
         conn,
         `UPDATE cag_link_pages
-         SET slug = ?, title = ?, subtitle = ?, description = ?, email = ?, phone = ?, links_json = ?, is_active = ?, updated_by = ?
+         SET slug = ?, page_type = ?, title = ?, subtitle = ?, description = ?, email = ?, phone = ?, links_json = ?, is_active = ?, updated_by = ?
          WHERE id_link_page = ?`,
         [
           p.slug,
+          p.pageType,
           p.title,
           p.subtitle || null,
           p.description || null,
