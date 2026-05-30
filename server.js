@@ -282,6 +282,14 @@ const LINK_PAGE_ASSET_PATHS = {
   scene: resolveAsset("link-page-scene.js"),
   three: resolveAsset("node_modules/three/build/three.module.min.js"),
 };
+const GAME_ROOM_ASSET_NAMES = new Set([
+  "art-01.webp",
+  "art-02.webp",
+  "art-03.webp",
+  "art-04.webp",
+  "art-05.webp",
+  "art-06.webp",
+]);
 
 function sendAsset(reply, kind) {
   const p = ASSET_PATHS[kind];
@@ -344,6 +352,14 @@ function sendLinkPageAsset(reply, kind) {
 
 fastify.get("/assets/link-page-scene.js", async (_req, reply) => sendLinkPageAsset(reply, "scene"));
 fastify.get("/assets/three.module.min.js", async (_req, reply) => sendLinkPageAsset(reply, "three"));
+fastify.get("/assets/game-room/:file", async (req, reply) => {
+  const file = sanitizeText(req.params && req.params.file, 80);
+  if (!GAME_ROOM_ASSET_NAMES.has(file)) return sendError(reply, 404, "Game room asset not found");
+  const p = resolveAsset(path.join("link-page-assets", "game-room", file));
+  if (!p) return sendError(reply, 404, "Game room asset not found");
+  reply.header("Cache-Control", "public, max-age=86400");
+  reply.type("image/webp").send(fs.readFileSync(p));
+});
 
 function sendError(reply, status, message, extra) {
   reply.code(status).send(Object.assign({ message }, extra || {}));
