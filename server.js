@@ -24,7 +24,6 @@ const fastify = require("fastify")({
 
 const cors = require("@fastify/cors");
 const helmet = require("@fastify/helmet");
-const rateLimit = require("@fastify/rate-limit");
 const mysql = require("mysql2/promise");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
@@ -2267,19 +2266,38 @@ if (CFG.enableDebugRoutes) {
   );
 }
 
-// ---- AUTH ----
-fastify.register(async (loginScope) => {
-  loginScope.register(rateLimit, {
-    max: 10,
-    timeWindow: "1 minute",
-    keyGenerator: (req) => req.ip,
-    errorResponseBuilder: (_req, context) => ({
-      message: `Trop de tentatives de connexion. Reessaye dans ${Math.ceil(context.ttl / 1000)}s.`,
-      statusCode: 429,
-    }),
-  });
+// ---- Rate limiting manuel pour /auth/login ----
+const LOGIN_RATE_WINDOW_MS = 60 * 1000;
+const LOGIN_RATE_MAX = 10;
+const loginAttempts = new Map();
 
-  loginScope.post(CFG.apiPrefix + "/auth/login", async (req, reply) => {
+setInterval(() => {
+  const now = Date.now();
+  for (const [ip, rec] of loginAttempts) {
+    if (now > rec.resetAt) loginAttempts.delete(ip);
+  }
+}, 5 * 60 * 1000);
+
+function loginRateLimit(req, reply) {
+  const ip = req.ip || (req.socket && req.socket.remoteAddress) || "unknown";
+  const now = Date.now();
+  let rec = loginAttempts.get(ip);
+  if (!rec || now > rec.resetAt) {
+    rec = { count: 0, resetAt: now + LOGIN_RATE_WINDOW_MS };
+    loginAttempts.set(ip, rec);
+  }
+  rec.count += 1;
+  if (rec.count > LOGIN_RATE_MAX) {
+    const retryAfterSec = Math.ceil((rec.resetAt - now) / 1000);
+    reply.header("Retry-After", retryAfterSec);
+    return sendError(reply, 429, `Trop de tentatives de connexion. Reessaye dans ${retryAfterSec}s.`);
+  }
+}
+
+// ---- AUTH ----
+fastify.post(CFG.apiPrefix + "/auth/login", async (req, reply) => {
+  const blocked = loginRateLimit(req, reply);
+  if (blocked !== undefined || reply.sent) return;
   const body = getRequestPayloadObject(req);
   const usernameRaw =
     typeof body.username === "string"
@@ -2358,7 +2376,6 @@ fastify.register(async (loginScope) => {
   );
 
   reply.send({ token, user: publicUser(user) });
-  });
 });
 
 fastify.get(
