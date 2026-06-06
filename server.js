@@ -24,6 +24,7 @@ const fastify = require("fastify")({
 
 const cors = require("@fastify/cors");
 const helmet = require("@fastify/helmet");
+const rateLimit = require("@fastify/rate-limit");
 const mysql = require("mysql2/promise");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
@@ -83,6 +84,7 @@ const CFG = {
   businessDayEndHour: clampHour(env("BUSINESS_DAY_END_HOUR", "3"), 3),
   businessTimeOffsetMinutes: parseBusinessOffsetMinutes(),
   corsOrigins: parseCsv(env("CORS_ORIGINS", "https://mybusinesslife.fr,https://www.mybusinesslife.fr")),
+  enableDebugRoutes: envBool("ENABLE_DEBUG_ROUTES", false),
   enforceRoles: envBool("ENFORCE_ROLES", true),
   writeRoles: parseCsv(env("WRITE_ROLES", "admin,manager")).map((r) => r.toLowerCase()),
   allowWriteWithoutRole: envBool("ALLOW_WRITE_WITHOUT_ROLE", true),
@@ -210,6 +212,10 @@ const POS_SCHEMA = {
   products: new Set(),
 };
 
+fastify.register(rateLimit, {
+  global: false,
+});
+
 fastify.register(helmet, {
   global: true,
   contentSecurityPolicy: {
@@ -292,10 +298,33 @@ const GAME_ROOM_ASSET_NAMES = new Set([
   "art-06.webp",
 ]);
 
+const ASSET_CACHE = {};
+
+function loadAssetCache() {
+  for (const [kind, p] of Object.entries(ASSET_PATHS)) {
+    if (p) {
+      try { ASSET_CACHE[kind] = fs.readFileSync(p); } catch (_) {}
+    }
+  }
+  for (const [kind, p] of Object.entries(ADMIN_V2_ASSET_PATHS)) {
+    if (p) {
+      try { ASSET_CACHE[`admin2_${kind}`] = fs.readFileSync(p); } catch (_) {}
+    }
+  }
+  for (const [kind, p] of Object.entries(LINK_PAGE_ASSET_PATHS)) {
+    if (p) {
+      try { ASSET_CACHE[`link_${kind}`] = fs.readFileSync(p); } catch (_) {}
+    }
+  }
+}
+
 function sendAsset(reply, kind) {
-  const p = ASSET_PATHS[kind];
-  if (!p) return sendError(reply, 404, "Asset not found", { kind });
-  const buf = fs.readFileSync(p);
+  const buf = ASSET_CACHE[kind] || (() => {
+    const p = ASSET_PATHS[kind];
+    if (!p) return null;
+    try { return fs.readFileSync(p); } catch (_) { return null; }
+  })();
+  if (!buf) return sendError(reply, 404, "Asset not found", { kind });
   reply.header("Cache-Control", "public, max-age=300");
   if (kind === "js") reply.type("application/javascript; charset=utf-8").send(buf);
   else reply.type("text/css; charset=utf-8").send(buf);
@@ -305,9 +334,12 @@ fastify.get("/cag-pos-dashboard.js", async (_req, reply) => sendAsset(reply, "js
 fastify.get("/cag-pos-dashboard.css", async (_req, reply) => sendAsset(reply, "css"));
 
 function sendAdminV2Asset(reply, kind) {
-  const p = ADMIN_V2_ASSET_PATHS[kind];
-  if (!p) return sendError(reply, 404, "Admin v2 asset not found", { kind });
-  const buf = fs.readFileSync(p);
+  const buf = ASSET_CACHE[`admin2_${kind}`] || (() => {
+    const p = ADMIN_V2_ASSET_PATHS[kind];
+    if (!p) return null;
+    try { return fs.readFileSync(p); } catch (_) { return null; }
+  })();
+  if (!buf) return sendError(reply, 404, "Admin v2 asset not found", { kind });
   if (kind === "index" || kind === "login") {
     reply.header("Cache-Control", "no-cache");
     reply.type("text/html; charset=utf-8").send(buf);
@@ -344,9 +376,12 @@ fastify.get("/login", async (_req, reply) => sendAdminV2Asset(reply, "login"));
 fastify.get("/login/", async (_req, reply) => sendAdminV2Asset(reply, "login"));
 
 function sendLinkPageAsset(reply, kind) {
-  const p = LINK_PAGE_ASSET_PATHS[kind];
-  if (!p) return sendError(reply, 404, "Link page asset not found", { kind });
-  const buf = fs.readFileSync(p);
+  const buf = ASSET_CACHE[`link_${kind}`] || (() => {
+    const p = LINK_PAGE_ASSET_PATHS[kind];
+    if (!p) return null;
+    try { return fs.readFileSync(p); } catch (_) { return null; }
+  })();
+  if (!buf) return sendError(reply, 404, "Link page asset not found", { kind });
   reply.header("Cache-Control", "public, max-age=86400");
   reply.type("application/javascript; charset=utf-8").send(buf);
 }
@@ -839,6 +874,12 @@ function sanitizeImageUrl(v) {
   if (typeof v !== "string") return null;
   const s = v.trim();
   if (!s) return null;
+  try {
+    const url = new URL(s);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+  } catch (_) {
+    return null;
+  }
   return s.slice(0, 1024);
 }
 
@@ -2152,83 +2193,96 @@ fastify.get(
   }
 );
 
-fastify.get(
-  CFG.apiPrefix + "/debug/write-access",
-  {
-    preHandler: requireAuth,
-  },
-  async (req) => {
-    return {
-      ok: true,
-      apiVersion: API_VERSION,
-      enforceRoles: CFG.enforceRoles,
-      allowWriteWithoutRole: CFG.allowWriteWithoutRole,
-      requiredRoles: CFG.writeRoles,
-      roles: extractRoleTokens(req.cagUser && req.cagUser.roles),
-      canWrite: hasWriteRole(req.cagUser),
-    };
-  }
-);
-
-fastify.post(
-  CFG.apiPrefix + "/debug/write-probe",
-  {
-    preHandler: [requireAuth, requireWrite],
-  },
-  async (req, reply) => {
-    const b = getRequestPayloadObject(req);
-    const idRaw = b.id_product != null ? b.id_product : b.id;
-    const id = /^\d+$/.test(String(idRaw)) ? Number(idRaw) : null;
-    if (!id) return sendError(reply, 400, "Missing or invalid id_product");
-
-    let conn = null;
-    const startedAt = Date.now();
-    try {
-      conn = await getConnectionWithTimeout(4000);
-      await conn.beginTransaction();
-
-      const [rows] = await queryWithTimeout(
-        conn,
-        `SELECT id_product, name, last_updated FROM products WHERE id_product = ? LIMIT 1`,
-        [id],
-        6000
-      );
-      if (!rows || !rows[0]) {
-        await conn.rollback();
-        return sendError(reply, 404, "Product not found");
-      }
-
-      await queryWithTimeout(conn, `UPDATE products SET last_updated = NOW() WHERE id_product = ?`, [id], 8000);
-      await conn.rollback();
-
+if (CFG.enableDebugRoutes) {
+  fastify.get(
+    CFG.apiPrefix + "/debug/write-access",
+    {
+      preHandler: requireAuth,
+    },
+    async (req) => {
       return {
         ok: true,
-        id_product: id,
-        elapsedMs: Date.now() - startedAt,
+        apiVersion: API_VERSION,
+        enforceRoles: CFG.enforceRoles,
+        allowWriteWithoutRole: CFG.allowWriteWithoutRole,
+        requiredRoles: CFG.writeRoles,
+        roles: extractRoleTokens(req.cagUser && req.cagUser.roles),
+        canWrite: hasWriteRole(req.cagUser),
       };
-    } catch (e) {
+    }
+  );
+
+  fastify.post(
+    CFG.apiPrefix + "/debug/write-probe",
+    {
+      preHandler: [requireAuth, requireWrite],
+    },
+    async (req, reply) => {
+      const b = getRequestPayloadObject(req);
+      const idRaw = b.id_product != null ? b.id_product : b.id;
+      const id = /^\d+$/.test(String(idRaw)) ? Number(idRaw) : null;
+      if (!id) return sendError(reply, 400, "Missing or invalid id_product");
+
+      let conn = null;
+      const startedAt = Date.now();
       try {
-        if (conn) await conn.rollback();
-      } catch (_) {
-        // ignore rollback failure on broken connection
-      }
-      const handled = handleDbWriteError(req, reply, e, "debug-write-probe");
-      if (handled !== false) return handled;
-      throw e;
-    } finally {
-      if (conn) {
+        conn = await getConnectionWithTimeout(4000);
+        await conn.beginTransaction();
+
+        const [rows] = await queryWithTimeout(
+          conn,
+          `SELECT id_product, name, last_updated FROM products WHERE id_product = ? LIMIT 1`,
+          [id],
+          6000
+        );
+        if (!rows || !rows[0]) {
+          await conn.rollback();
+          return sendError(reply, 404, "Product not found");
+        }
+
+        await queryWithTimeout(conn, `UPDATE products SET last_updated = NOW() WHERE id_product = ?`, [id], 8000);
+        await conn.rollback();
+
+        return {
+          ok: true,
+          id_product: id,
+          elapsedMs: Date.now() - startedAt,
+        };
+      } catch (e) {
         try {
-          conn.release();
+          if (conn) await conn.rollback();
         } catch (_) {
-          // ignore
+          // ignore rollback failure on broken connection
+        }
+        const handled = handleDbWriteError(req, reply, e, "debug-write-probe");
+        if (handled !== false) return handled;
+        throw e;
+      } finally {
+        if (conn) {
+          try {
+            conn.release();
+          } catch (_) {
+            // ignore
+          }
         }
       }
     }
-  }
-);
+  );
+}
 
 // ---- AUTH ----
-fastify.post(CFG.apiPrefix + "/auth/login", async (req, reply) => {
+fastify.post(CFG.apiPrefix + "/auth/login", {
+  config: {
+    rateLimit: {
+      max: 10,
+      timeWindow: "1 minute",
+      errorResponseBuilder: () => ({
+        message: "Trop de tentatives de connexion. Reessaye dans 1 minute.",
+        statusCode: 429,
+      }),
+    },
+  },
+}, async (req, reply) => {
   const body = getRequestPayloadObject(req);
   const usernameRaw =
     typeof body.username === "string"
@@ -5074,6 +5128,8 @@ fastify.setErrorHandler((err, req, reply) => {
 });
 
 async function main() {
+  loadAssetCache();
+
   // Optional schema feature: keep legacy users.password for POS and use users.password_hash (bcrypt) for dashboard.
   try {
     await ensureUsersArchiveColumns(pool);
