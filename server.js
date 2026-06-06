@@ -212,9 +212,6 @@ const POS_SCHEMA = {
   products: new Set(),
 };
 
-fastify.register(rateLimit, {
-  global: false,
-});
 
 fastify.register(helmet, {
   global: true,
@@ -2271,18 +2268,18 @@ if (CFG.enableDebugRoutes) {
 }
 
 // ---- AUTH ----
-fastify.post(CFG.apiPrefix + "/auth/login", {
-  config: {
-    rateLimit: {
-      max: 10,
-      timeWindow: "1 minute",
-      errorResponseBuilder: () => ({
-        message: "Trop de tentatives de connexion. Reessaye dans 1 minute.",
-        statusCode: 429,
-      }),
-    },
-  },
-}, async (req, reply) => {
+fastify.register(async (loginScope) => {
+  loginScope.register(rateLimit, {
+    max: 10,
+    timeWindow: "1 minute",
+    keyGenerator: (req) => req.ip,
+    errorResponseBuilder: (_req, context) => ({
+      message: `Trop de tentatives de connexion. Reessaye dans ${Math.ceil(context.ttl / 1000)}s.`,
+      statusCode: 429,
+    }),
+  });
+
+  loginScope.post(CFG.apiPrefix + "/auth/login", async (req, reply) => {
   const body = getRequestPayloadObject(req);
   const usernameRaw =
     typeof body.username === "string"
@@ -2361,6 +2358,7 @@ fastify.post(CFG.apiPrefix + "/auth/login", {
   );
 
   reply.send({ token, user: publicUser(user) });
+  });
 });
 
 fastify.get(
