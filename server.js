@@ -80,7 +80,7 @@ const CFG = {
   migratePlaintextPasswords: envBool("MIGRATE_PLAINTEXT_PASSWORDS", false),
   migratePlaintextPasswordsOverwrite: envBool("MIGRATE_PLAINTEXT_PASSWORDS_OVERWRITE", false),
   businessDayStartHour: clampHour(env("BUSINESS_DAY_START_HOUR", "12"), 12),
-  businessDayEndHour: clampHour(env("BUSINESS_DAY_END_HOUR", "3"), 3),
+  businessDayEndHour: clampHour(env("BUSINESS_DAY_END_HOUR", "6"), 6),
   businessTimeOffsetMinutes: parseBusinessOffsetMinutes(),
   corsOrigins: parseCsv(env("CORS_ORIGINS", "https://mybusinesslife.fr,https://www.mybusinesslife.fr")),
   enableDebugRoutes: envBool("ENABLE_DEBUG_ROUTES", false),
@@ -2843,7 +2843,7 @@ fastify.get(
     const fromIso = req.query && req.query.from;
     const toIso = req.query && req.query.to;
     const category = normalizeCategory(req.query && req.query.category);
-    const r = calendarRangeToSql(fromIso, toIso);
+    const r = rangeToSql(fromIso, toIso);
     if (!r) return sendError(reply, 400, "Invalid from/to (expected YYYY-MM-DD)");
     const salesLocalExpr = businessLocalDateTimeSql("s.last_updated");
     const salesRangeWhere = `${salesLocalExpr} >= ? AND ${salesLocalExpr} < ?`;
@@ -3100,7 +3100,7 @@ fastify.get(
     const fromIso = req.query && req.query.from;
     const toIso = req.query && req.query.to;
     const category = normalizeCategory(req.query && req.query.category);
-    const r = calendarRangeToSql(fromIso, toIso);
+    const r = rangeToSql(fromIso, toIso);
     if (!r) return sendError(reply, 400, "Invalid from/to (expected YYYY-MM-DD)");
 
     const q = (req.query && typeof req.query.q === "string" ? req.query.q.trim() : "") || "";
@@ -3148,8 +3148,8 @@ fastify.get(
            AND (
              ? = '' OR s.notes LIKE ? OR u.username LIKE ? OR s.id_sale = ? OR p.name LIKE ? OR p.reference LIKE ?
            )
-         GROUP BY s.id_sale, s.notes, s.user_id, u.username, ${salesLocalExpr}
-         ORDER BY ${salesLocalExpr} DESC
+         GROUP BY s.id_sale
+         ORDER BY MIN(${salesLocalExpr}) DESC
          LIMIT ? OFFSET ?`,
         [r.from, r.toExcl, category, q, like, like, qNum, like, like, limit, offset]
       );
