@@ -32,7 +32,7 @@
 (function () {
   "use strict";
 
-  var APP_VERSION = "1.0.5";
+  var APP_VERSION = "1.1.0";
   var ROOT_SELECTOR = '[data-cag="pos-dashboard"]';
 
   function $(sel, root) {
@@ -216,7 +216,7 @@
     var epProductCategories = (root.getAttribute("data-ep-product-categories") || "/products/categories").trim();
     var epOffers = (root.getAttribute("data-ep-offers") || "/offers").trim();
     var requestTimeoutMs = parseInt(root.getAttribute("data-request-timeout-ms") || "15000", 10);
-    var writeRequestTimeoutMs = parseInt(root.getAttribute("data-write-timeout-ms") || "45000", 10);
+    var writeRequestTimeoutMs = parseInt(root.getAttribute("data-write-timeout-ms") || "60000", 10);
 
     return {
       apiBase: apiBase.replace(/\/+$/, ""),
@@ -239,7 +239,7 @@
       epProductCategories: epProductCategories,
       epOffers: epOffers,
       requestTimeoutMs: Number.isFinite(requestTimeoutMs) ? clamp(requestTimeoutMs, 5000, 120000) : 15000,
-      writeRequestTimeoutMs: Number.isFinite(writeRequestTimeoutMs) ? clamp(writeRequestTimeoutMs, 10000, 180000) : 45000,
+      writeRequestTimeoutMs: Number.isFinite(writeRequestTimeoutMs) ? clamp(writeRequestTimeoutMs, 5000, 60000) : 15000,
     };
   }
 
@@ -283,10 +283,14 @@
   function readAuth(cfg) {
     try {
       var raw = localStorage.getItem(cfg.storageKey);
+      if (!raw) raw = localStorage.getItem(cfg.storageKey + "__alwaysdata");
       if (!raw) return null;
       var data = safeJsonParse(raw);
       if (!data || typeof data !== "object") return null;
       if (typeof data.token !== "string" || !data.token) return null;
+      if (!localStorage.getItem(cfg.storageKey)) {
+        localStorage.setItem(cfg.storageKey, JSON.stringify(data));
+      }
       return data;
     } catch (_) {
       return null;
@@ -304,6 +308,7 @@
   function clearAuth(cfg) {
     try {
       localStorage.removeItem(cfg.storageKey);
+      localStorage.removeItem(cfg.storageKey + "__alwaysdata");
     } catch (_) {
       // ignore
     }
@@ -369,6 +374,7 @@
             : null,
       price: p.price != null ? Number(p.price) : null,
       productType: p.productType || p.product_type || "",
+      imageUrl: p.imageUrl || p.image_url || "",
       lastUpdated: p.last_updated || p.lastUpdated || null,
       raw: p,
     };
@@ -477,33 +483,50 @@
     var url = cfg.apiBase + path;
     if (opts.query) {
       var usp = new URLSearchParams();
+      var keepEmptyQuery = !!opts.keepEmptyQuery;
       Object.keys(opts.query).forEach(function (k) {
         var v = opts.query[k];
-        if (v == null || v === "") return;
+        if (v == null) return;
+        if (v === "" && !keepEmptyQuery) return;
         usp.set(k, String(v));
       });
       var qs = usp.toString();
       if (qs) url += (url.indexOf("?") === -1 ? "?" : "&") + qs;
     }
 
+    var useSimpleAuth = !!opts.simpleAuth;
     var headers = Object.assign({ Accept: "application/json" }, opts.headers || {});
-    if (opts.json !== undefined) headers["Content-Type"] = "application/json";
+    if (opts.json !== undefined) headers["Content-Type"] = useSimpleAuth ? "text/plain;charset=UTF-8" : "application/json";
 
     var auth = readAuth(cfg);
-    if (auth && auth.token) headers.Authorization = "Bearer " + auth.token;
+    if (useSimpleAuth && (!auth || !auth.token)) {
+      var authErr = new Error("Session expirée. Reconnexion requise.");
+      authErr.status = 401;
+      throw authErr;
+    }
+    if (!useSimpleAuth && !opts.noAuthHeader && auth && auth.token) headers.Authorization = "Bearer " + auth.token;
 
     var method = String(opts.method || "GET").toUpperCase();
     var baseTimeoutMs = cfg && Number.isFinite(Number(cfg.requestTimeoutMs)) ? Number(cfg.requestTimeoutMs) : 15000;
-    var writeTimeoutMs = cfg && Number.isFinite(Number(cfg.writeRequestTimeoutMs)) ? Number(cfg.writeRequestTimeoutMs) : 45000;
+    var writeTimeoutMs = cfg && Number.isFinite(Number(cfg.writeRequestTimeoutMs)) ? Number(cfg.writeRequestTimeoutMs) : 15000;
     var isWriteMethod = method === "POST" || method === "PUT" || method === "PATCH" || method === "DELETE";
-    var timeoutMs = isWriteMethod ? Math.max(baseTimeoutMs, writeTimeoutMs) : baseTimeoutMs;
+    var timeoutMs = Number.isFinite(Number(opts.timeoutMs)) ? Number(opts.timeoutMs) : isWriteMethod ? writeTimeoutMs : baseTimeoutMs;
     var ctrl = typeof AbortController !== "undefined" ? new AbortController() : null;
     var timer = null;
+
+    var bodyPayload;
+    if (opts.json !== undefined) {
+      if (useSimpleAuth) {
+        bodyPayload = JSON.stringify(Object.assign({}, opts.json || {}, { _token: auth && auth.token ? auth.token : "" }));
+      } else {
+        bodyPayload = JSON.stringify(opts.json);
+      }
+    }
 
     var fetchPromise = fetch(url, {
         method: method,
         headers: headers,
-        body: opts.json !== undefined ? JSON.stringify(opts.json) : undefined,
+        body: bodyPayload,
         signal: ctrl ? ctrl.signal : undefined,
       });
 
@@ -1148,35 +1171,94 @@
   }
 
   async function createProduct(cfg, payload) {
-    return apiFetch(cfg, cfg.epProducts, { method: "POST", json: payload });
+    var lastErr = null;
+
+    try {
+      return await apiFetch(cfg, cfg.epProducts, { method: "POST", json: payload, simpleAuth: true });
+    } catch (errSimple) {
+      lastErr = errSimple;
+    }
+
+    try {
+      return await apiFetch(cfg, cfg.epProducts, {
+        method: "POST",
+        query: buildWriteQueryPayload(cfg, payload),
+        keepEmptyQuery: true,
+        noAuthHeader: true,
+      });
+    } catch (errQuery) {
+      lastErr = errQuery;
+    }
+
+    return apiFetch(cfg, cfg.epProducts, { method: "POST", json: payload }).catch(function (errAuth) {
+      throw errAuth || lastErr || new Error("Erreur creation produit");
+    });
+  }
+
+  function buildWriteQueryPayload(cfg, payload) {
+    var out = {};
+    var auth = readAuth(cfg);
+    if (auth && auth.token) out._token = auth.token;
+    Object.keys(payload || {}).forEach(function (k) {
+      var v = payload[k];
+      if (v === undefined) return;
+      out[k] = v == null ? "" : String(v);
+    });
+    return out;
   }
 
   async function updateProduct(cfg, id, payload) {
-    var path = cfg.epProducts + "/" + encodeURIComponent(String(id));
+    var idEnc = encodeURIComponent(String(id));
+    var path = cfg.epProducts + "/" + idEnc;
+    var simplePath = cfg.epProducts + "/" + idEnc + "/update";
     var lastErr = null;
 
-    for (var i = 0; i < 2; i++) {
-      try {
-        return await apiFetch(cfg, path, { method: "PUT", json: payload });
-      } catch (errPut) {
-        lastErr = errPut;
-        var s = errPut && errPut.status;
-        var isTransient = s === 408 || s === 429 || s === 500 || s === 502 || s === 503 || s === 504;
-        var isMethodCompat = s === 404 || s === 405 || s === 501;
+    try {
+      return await apiFetch(cfg, simplePath, { method: "POST", json: payload, simpleAuth: true });
+    } catch (errSimple) {
+      lastErr = errSimple;
+    }
 
-        if (isMethodCompat) break;
-        if (isTransient && i === 0) {
-          await delay(700);
-          continue;
+    try {
+      return await apiFetch(cfg, simplePath, {
+        method: "POST",
+        query: buildWriteQueryPayload(cfg, payload),
+        keepEmptyQuery: true,
+        noAuthHeader: true,
+      });
+    } catch (errQuery) {
+      lastErr = errQuery;
+    }
+
+    async function call(method) {
+      try {
+        return await apiFetch(cfg, path, { method: method, json: payload });
+      } catch (err) {
+        var status = err && err.status;
+        var methodCompat = status === 404 || status === 405 || status === 501;
+        if (methodCompat) {
+          err._methodCompat = true;
+          throw err;
         }
-        throw errPut;
+        var transientErr = status === 408 || status === 429 || status === 500 || status === 502 || status === 503 || status === 504;
+        if (!transientErr) throw err;
+        await delay(350);
+        return apiFetch(cfg, path, { method: method, json: payload });
       }
     }
 
     try {
-      return await apiFetch(cfg, path, { method: "PATCH", json: payload });
+      return await call("PUT");
+    } catch (errPut) {
+      lastErr = errPut;
+      if (errPut && errPut._methodCompat) {
+        // compat issue: continue directly with PATCH fallback.
+      }
+    }
+    try {
+      return await call("PATCH");
     } catch (errPatch) {
-      throw errPatch || lastErr;
+      throw errPatch || lastErr || new Error("Erreur mise a jour produit");
     }
   }
 
@@ -2048,7 +2130,47 @@
         var fQty = el("input", { class: "cag-input", type: "number", step: "1", value: product && product.quantity != null ? String(product.quantity) : "" });
         var fBuy = el("input", { class: "cag-input", type: "number", step: "0.01", value: product && product.purchasePrice != null ? String(product.purchasePrice) : "" });
         var fSell = el("input", { class: "cag-input", type: "number", step: "0.01", value: product && product.price != null ? String(product.price) : "" });
+        var fImage = el("input", {
+          class: "cag-input",
+          type: "url",
+          inputmode: "url",
+          placeholder: "https://...",
+          value: (product && product.imageUrl) || "",
+        });
         var fDesc = el("textarea", { class: "cag-input", rows: 3, value: (product && product.description) || "" });
+        var imagePreview = el("img", {
+          class: "cag-image-preview",
+          alt: "Aperçu image produit",
+          style: { display: "none" },
+        });
+        var imagePreviewHint = el("div", {
+          class: "cag-small cag-image-preview-hint",
+          text: "Colle un lien public d'image pour voir l'aperçu.",
+        });
+
+        function syncImagePreview() {
+          var value = fImage.value.trim();
+          if (!value) {
+            imagePreview.removeAttribute("src");
+            imagePreview.style.display = "none";
+            imagePreviewHint.textContent = "Colle un lien public d'image pour voir l'aperçu.";
+            return;
+          }
+          imagePreview.src = value;
+          imagePreview.style.display = "";
+          imagePreviewHint.textContent = value;
+        }
+
+        imagePreview.addEventListener("error", function () {
+          imagePreview.style.display = "none";
+          imagePreviewHint.textContent = "Image introuvable ou inaccessible depuis un lien public.";
+        });
+        imagePreview.addEventListener("load", function () {
+          imagePreview.style.display = "";
+          imagePreviewHint.textContent = "Aperçu chargé.";
+        });
+        fImage.addEventListener("input", syncImagePreview);
+        syncImagePreview();
 
         var form = el(
           "form",
@@ -2060,6 +2182,8 @@
           el("div", { class: "cag-field" }, el("label", { text: "Stock" }), fQty),
           el("div", { class: "cag-field" }, el("label", { text: "Prix d'achat" }), fBuy),
           el("div", { class: "cag-field" }, el("label", { text: "Prix de vente" }), fSell),
+          el("div", { class: "cag-field cag-field-full" }, el("label", { text: "Lien image" }), fImage),
+          el("div", { class: "cag-field cag-field-full" }, el("label", { text: "Aperçu" }), el("div", { class: "cag-image-preview-wrap" }, imagePreview, imagePreviewHint)),
           el("div", { class: "cag-field cag-field-full" }, el("label", { text: "Description" }), fDesc)
         );
         var productFormId = "cag-product-form-" + Date.now() + "-" + Math.floor(Math.random() * 100000);
@@ -2069,7 +2193,8 @@
         saveBtn.setAttribute("form", productFormId);
         var cancelBtn = el("button", { class: "cag-btn", type: "button", text: "Annuler" });
 
-        var actions = el("div", { class: "cag-form-actions" }, cancelBtn, saveBtn);
+        var feedback = el("div", { class: "cag-form-feedback", "aria-live": "polite" });
+        var actions = el("div", { class: "cag-form-actions" }, feedback, cancelBtn, saveBtn);
         var modal = openModal(root, isEdit ? "Modifier produit" : "Ajouter produit", form, actions);
 
         cancelBtn.addEventListener("click", modal.close);
@@ -2078,6 +2203,8 @@
           e.preventDefault();
           (async function () {
             setBusy(saveBtn, true, "Sauvegarde...");
+            feedback.textContent = "";
+            feedback.removeAttribute("data-kind");
             try {
               function parseNumberField(rawValue, fieldLabel) {
                 var parsed = parseInputNumber(rawValue);
@@ -2094,12 +2221,14 @@
               if (!nameValue) throw new Error("Nom requis");
 
               var payload;
+              var imageValue = fImage.value.trim();
               if (isEdit) {
                 payload = {};
                 if (nameValue !== (product.name || "")) payload.name = nameValue;
                 if (typeValue !== (product.productType || "")) payload.productType = typeValue;
                 if (fBarcode.value.trim() !== (product.barcode || "")) payload.barcode = fBarcode.value.trim();
                 if (fRef.value.trim() !== (product.reference || "")) payload.reference = fRef.value.trim();
+                if (imageValue !== (product.imageUrl || "")) payload.imageUrl = imageValue;
                 if (String(fDesc.value || "") !== String(product.description || "")) payload.description = fDesc.value;
 
                 if (qtyVal !== undefined && qtyVal !== product.quantity) payload.quantity = qtyVal;
@@ -2116,6 +2245,7 @@
                   productType: typeValue,
                   barcode: fBarcode.value.trim(),
                   reference: fRef.value.trim(),
+                  imageUrl: imageValue,
                   description: fDesc.value,
                 };
                 payload.quantity = qtyVal === undefined ? null : qtyVal;
@@ -2127,16 +2257,23 @@
                 window.console.debug("[CAG] save product", { id: isEdit ? product.id : null, payload: payload });
               }
 
-              if (isEdit) await updateProduct(cfg, product.id, payload);
-              else await createProduct(cfg, payload);
+              var saveRes = null;
+              if (isEdit) saveRes = await updateProduct(cfg, product.id, payload);
+              else saveRes = await createProduct(cfg, payload);
 
-              toast(root, isEdit ? "Produit mis à jour." : "Produit créé.", "ok");
+              var okMsg = isEdit ? "Produit mis a jour." : "Produit cree.";
+              if (isEdit && saveRes && saveRes.eventual) okMsg = "Produit mis a jour (confirme apres relecture).";
+              feedback.textContent = okMsg;
+              feedback.setAttribute("data-kind", "ok");
+              toast(root, okMsg, "ok");
               modal.close();
               run();
             } catch (err) {
               var msg = (err && err.message) || "Erreur sauvegarde produit";
               if (err && err.status) msg += " (HTTP " + err.status + ")";
               if (err && err.data && err.data.hint) msg += " - " + err.data.hint;
+              feedback.textContent = msg;
+              feedback.setAttribute("data-kind", "err");
               toast(root, msg, "err", 5200);
             } finally {
               setBusy(saveBtn, false, isEdit ? "Enregistrer" : "Créer");
@@ -2318,7 +2455,8 @@
         var saveBtn = el("button", { class: "cag-btn cag-btn-primary", type: "submit", text: isEdit ? "Enregistrer" : "Créer" });
         saveBtn.setAttribute("form", offerFormId);
         var cancelBtn = el("button", { class: "cag-btn", type: "button", text: "Annuler" });
-        var actions = el("div", { class: "cag-form-actions" }, cancelBtn, saveBtn);
+        var feedback = el("div", { class: "cag-form-feedback", "aria-live": "polite" });
+        var actions = el("div", { class: "cag-form-actions" }, feedback, cancelBtn, saveBtn);
 
         var modal = openModal(root, isEdit ? "Modifier offre" : "Ajouter offre", form, actions);
         cancelBtn.addEventListener("click", modal.close);
@@ -2375,6 +2513,8 @@
           e.preventDefault();
           (async function () {
             setBusy(saveBtn, true, "Sauvegarde...");
+            feedback.textContent = "";
+            feedback.removeAttribute("data-kind");
             try {
               var productIds = Object.keys(selected).map(function (k) {
                 return Number(k);
@@ -2390,11 +2530,18 @@
               if (isEdit) await updateOffer(cfg, offer.id, payload);
               else await createOffer(cfg, payload);
 
+              feedback.textContent = isEdit ? "Offre mise a jour." : "Offre creee.";
+              feedback.setAttribute("data-kind", "ok");
               toast(root, isEdit ? "Offre mise à jour." : "Offre créée.", "ok");
               modal.close();
               run();
             } catch (err) {
-              toast(root, (err && err.message) || "Erreur sauvegarde offre", "err", 5200);
+              var msg = (err && err.message) || "Erreur sauvegarde offre";
+              if (err && err.status) msg += " (HTTP " + err.status + ")";
+              if (err && err.data && err.data.hint) msg += " - " + err.data.hint;
+              feedback.textContent = msg;
+              feedback.setAttribute("data-kind", "err");
+              toast(root, msg, "err", 5200);
             } finally {
               setBusy(saveBtn, false, isEdit ? "Enregistrer" : "Créer");
             }

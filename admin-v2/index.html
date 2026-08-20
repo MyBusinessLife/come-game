@@ -1,0 +1,254 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+    <meta name="theme-color" content="#07130f" />
+    <title>CAG Command Center</title>
+    <link rel="stylesheet" href="/admin-v2/app.css" />
+  </head>
+  <body>
+    <div class="ambient" aria-hidden="true">
+      <span class="orb orb-a"></span>
+      <span class="orb orb-b"></span>
+      <span class="orb orb-c"></span>
+      <span class="grid-glow"></span>
+    </div>
+
+    <main id="app" class="app-shell">
+      <section id="admin-screen" class="admin-layout" hidden>
+        <aside class="sidebar panel">
+          <div class="sidebar-brand">
+            <div class="brand-mark compact">CAG</div>
+            <div>
+              <strong>Command Center</strong>
+              <span id="front-version">Front</span>
+            </div>
+          </div>
+          <nav class="nav-list" aria-label="Navigation principale">
+            <button class="nav-item active" data-tab="cockpit"><span>01</span>Cockpit</button>
+            <button class="nav-item" data-tab="analysis"><span>02</span>Analyse</button>
+            <button class="nav-item" data-tab="sales"><span>03</span>Ventes</button>
+            <button class="nav-item" data-tab="products"><span>04</span>Produits</button>
+            <button class="nav-item" data-tab="offers"><span>05</span>Offres</button>
+            <button class="nav-item" data-tab="purchases"><span>06</span>Achats</button>
+            <button class="nav-item" data-tab="boxing"><span>07</span>Machines boxe</button>
+            <button class="nav-item" data-tab="users"><span>08</span>Utilisateurs</button>
+            <button class="nav-item" data-tab="link-pages"><span>09</span>QR clients</button>
+            <button class="nav-item" data-tab="journal"><span>10</span>Journal</button>
+          </nav>
+          <div class="sidebar-foot">
+            <span class="status-dot"></span>
+            <span id="user-line">Session</span>
+          </div>
+        </aside>
+
+        <div class="main-stage">
+          <header class="hero panel neon-panel">
+            <div class="hero-title">
+              <p class="eyebrow">MyBusinessLife x Come & Game</p>
+              <h1>Tableau de bord financier</h1>
+              <p id="hero-subtitle">Lecture temps reel des ventes, marges, achats et objectifs.</p>
+            </div>
+            <div class="hero-actions">
+              <button id="btn-refresh" class="btn btn-ghost">Rafraichir</button>
+              <button id="btn-logout" class="btn btn-soft">Deconnexion</button>
+            </div>
+          </header>
+
+          <section class="filters-panel panel">
+            <div class="filters-grid">
+              <label class="field compact-field"><span>Du</span><input id="filter-from" type="date" /></label>
+              <label class="field compact-field"><span>Au</span><input id="filter-to" type="date" /></label>
+              <label class="field compact-field"><span>Categorie vente</span><select id="filter-category"></select></label>
+            </div>
+            <div class="quick-filters">
+              <button class="chip active" data-range="today">Aujourd'hui</button>
+              <button class="chip" data-range="yesterday">Hier</button>
+              <button class="chip" data-range="7d">7j</button>
+              <button class="chip" data-range="30d">30j</button>
+              <button class="chip" data-range="month">Mois</button>
+              <button class="chip" data-range="prevmonth">M-1</button>
+            </div>
+          </section>
+
+          <div id="global-alert" class="toast-zone" aria-live="polite"></div>
+
+          <section class="tab-panel active" data-panel="cockpit">
+            <div id="kpis-grid" class="kpi-grid"></div>
+            <div class="dashboard-grid">
+              <article class="panel chart-card span-8">
+                <div class="section-head">
+                  <div><p class="eyebrow">Tendance</p><h2>Chiffre d'affaires par jour</h2></div>
+                  <span id="daily-performance-pill" class="metric-pill">Analyse</span>
+                </div>
+                <div id="daily-chart" class="chart-area"></div>
+              </article>
+              <article class="panel target-card span-4">
+                <p class="eyebrow">Objectif intelligent</p>
+                <h2 id="target-title">Objectif du jour</h2>
+                <div id="target-gauge" class="target-gauge"></div>
+                <div id="target-insights" class="insight-list"></div>
+              </article>
+              <article class="panel chart-card span-6">
+                <div class="section-head"><div><p class="eyebrow">Heures fortes</p><h2>Revenue par heure</h2></div></div>
+                <div id="hour-chart" class="chart-area small"></div>
+              </article>
+              <article class="panel chart-card span-6">
+                <div class="section-head"><div><p class="eyebrow">Categories</p><h2>Revenus par categorie</h2></div></div>
+                <div id="category-chart" class="chart-area small"></div>
+              </article>
+            </div>
+          </section>
+
+          <section class="tab-panel" data-panel="analysis">
+            <div class="analysis-grid">
+              <article class="panel span-5">
+                <p class="eyebrow">Objectifs CA</p>
+                <h2>Plan d'action quotidien</h2>
+                <div id="objective-stack" class="objective-stack"></div>
+              </article>
+              <article class="panel span-7">
+                <p class="eyebrow">Lecture performance</p>
+                <h2>Ce que les tendances disent</h2>
+                <div id="analysis-feed" class="analysis-feed"></div>
+              </article>
+              <article class="panel span-6">
+                <p class="eyebrow">Semaine</p>
+                <h2>Performance par jour</h2>
+                <div id="weekday-chart" class="chart-area small"></div>
+              </article>
+              <article class="panel span-6">
+                <p class="eyebrow">Rentabilite</p>
+                <h2>Top produits vendus</h2>
+                <div id="top-products-list" class="rank-list"></div>
+              </article>
+            </div>
+          </section>
+
+          <section class="tab-panel" data-panel="sales">
+            <article class="panel">
+              <div class="section-head sticky-actions">
+                <div><p class="eyebrow">Historique</p><h2>Ventes</h2></div>
+                <div class="section-actions"><input id="sales-search" class="search-input" type="search" placeholder="Rechercher une vente" /><button id="sales-refresh" class="btn btn-ghost">Actualiser</button></div>
+              </div>
+              <div id="sales-table" class="data-table"></div>
+              <div class="pager"><button id="sales-prev" class="btn btn-soft">Precedent</button><span id="sales-page">Page</span><button id="sales-next" class="btn btn-soft">Suivant</button></div>
+            </article>
+          </section>
+
+          <section class="tab-panel" data-panel="products">
+            <article class="panel">
+              <div class="section-head sticky-actions">
+                <div><p class="eyebrow">Catalogue</p><h2>Produits</h2></div>
+                <div class="section-actions"><select id="products-filter-category" class="search-input"></select><input id="products-search" class="search-input" type="search" placeholder="Nom, code barre, reference" /><button id="products-add" class="btn btn-primary">Ajouter</button></div>
+              </div>
+              <div id="products-table" class="data-table"></div>
+              <div class="pager"><button id="products-prev" class="btn btn-soft">Precedent</button><span id="products-page">Page</span><button id="products-next" class="btn btn-soft">Suivant</button></div>
+            </article>
+          </section>
+
+          <section class="tab-panel" data-panel="offers">
+            <article class="panel">
+              <div class="section-head sticky-actions">
+                <div><p class="eyebrow">Bundles</p><h2>Offres</h2></div>
+                <div class="section-actions"><input id="offers-search" class="search-input" type="search" placeholder="Rechercher une offre" /><button id="offers-add" class="btn btn-primary">Ajouter</button></div>
+              </div>
+              <div id="offers-table" class="data-table"></div>
+            </article>
+          </section>
+
+          <section class="tab-panel" data-panel="purchases">
+            <div class="purchase-layout">
+              <article class="panel span-4">
+                <p class="eyebrow">Tresorerie</p>
+                <h2>Achats & charges</h2>
+                <div id="purchase-kpis" class="purchase-kpis"></div>
+                <div id="purchase-category-chart" class="mini-bars"></div>
+              </article>
+              <article class="panel span-8">
+                <div class="section-head sticky-actions">
+                  <div><p class="eyebrow">Pilotage</p><h2>Enregistrer les achats</h2></div>
+                  <div class="section-actions"><select id="purchase-filter-category" class="search-input"></select><input id="purchases-search" class="search-input" type="search" placeholder="Libelle, fournisseur, produit" /><button id="purchases-add" class="btn btn-primary">Ajouter un achat</button></div>
+                </div>
+                <div id="purchases-table" class="data-table"></div>
+                <div class="pager"><button id="purchases-prev" class="btn btn-soft">Precedent</button><span id="purchases-page">Page</span><button id="purchases-next" class="btn btn-soft">Suivant</button></div>
+              </article>
+            </div>
+          </section>
+
+          <section class="tab-panel" data-panel="boxing">
+            <div class="boxing-layout">
+              <article class="panel span-4">
+                <p class="eyebrow">Placements externes</p>
+                <h2>Machines de boxe</h2>
+                <p class="muted-copy">Pilotage dedie des machines placees chez des partenaires : revenus, frais, ROI et objectifs par emplacement.</p>
+                <div id="boxing-kpis" class="purchase-kpis"></div>
+                <div id="boxing-category-chart" class="mini-bars"></div>
+              </article>
+              <article class="panel span-8">
+                <div class="section-head sticky-actions">
+                  <div><p class="eyebrow">Performance</p><h2>Revenus & frais par machine</h2></div>
+                  <div class="section-actions"><select id="boxing-filter-machine" class="search-input"></select><button id="boxing-add-machine" class="btn btn-soft">Ajouter machine</button><button id="boxing-add-entry" class="btn btn-primary">Ajouter mouvement</button></div>
+                </div>
+                <div id="boxing-machine-chart" class="mini-bars"></div>
+                <div id="boxing-daily-chart" class="chart-area small"></div>
+              </article>
+              <article class="panel span-5">
+                <div class="section-head"><div><p class="eyebrow">Parc</p><h2>Machines</h2></div></div>
+                <div id="boxing-machines-table" class="data-table"></div>
+              </article>
+              <article class="panel span-7">
+                <div class="section-head sticky-actions">
+                  <div><p class="eyebrow">Comptabilite boxe</p><h2>Revenus & frais</h2></div>
+                  <div class="section-actions"><select id="boxing-entry-type" class="search-input"><option value="">Tous</option><option value="revenue">Revenus</option><option value="expense">Frais</option></select><input id="boxing-entry-search" class="search-input" type="search" placeholder="Machine, lieu, libelle" /></div>
+                </div>
+                <div id="boxing-entries-table" class="data-table"></div>
+                <div class="pager"><button id="boxing-entries-prev" class="btn btn-soft">Precedent</button><span id="boxing-entries-page">Page</span><button id="boxing-entries-next" class="btn btn-soft">Suivant</button></div>
+              </article>
+            </div>
+          </section>
+
+          <section class="tab-panel" data-panel="users">
+            <article class="panel">
+              <div class="section-head sticky-actions">
+                <div><p class="eyebrow">Acces logiciel</p><h2>Utilisateurs</h2></div>
+                <div class="section-actions"><input id="users-search" class="search-input" type="search" placeholder="Nom ou role" /><button id="users-archive-toggle" class="btn btn-soft">Archives</button><button id="users-add" class="btn btn-primary">Creer un utilisateur</button></div>
+              </div>
+              <div class="user-access-note">
+                <strong>Travailleurs POS</strong>
+                <span>Le role Travailleur / caisse permet de se connecter au logiciel POS et d'enregistrer les ventes, sans donner les droits de gestion du dashboard.</span>
+              </div>
+              <div id="users-table" class="data-table"></div>
+            </article>
+          </section>
+
+          <section class="tab-panel" data-panel="link-pages">
+            <article class="panel">
+              <div class="section-head sticky-actions">
+                <div><p class="eyebrow">QR clients</p><h2>Pages de liens utiles</h2></div>
+                <div class="section-actions"><input id="link-pages-search" class="search-input" type="search" placeholder="Nom, email, telephone" /><button id="link-pages-add" class="btn btn-primary">Creer une page</button></div>
+              </div>
+              <div class="user-access-note">
+                <strong>QR imprimable</strong>
+                <span>Chaque page genere un lien public et un QR code PNG transparent pret a imprimer.</span>
+              </div>
+              <div id="link-pages-table" class="data-table"></div>
+              <div class="pager"><button id="link-pages-prev" class="btn btn-soft">Precedent</button><span id="link-pages-page">Page</span><button id="link-pages-next" class="btn btn-soft">Suivant</button></div>
+            </article>
+          </section>
+
+          <section class="tab-panel" data-panel="journal">
+            <article class="panel">
+              <div class="section-head"><div><p class="eyebrow">Diagnostic</p><h2>Journal API</h2></div><button id="clear-log" class="btn btn-soft">Vider</button></div>
+              <ul id="request-log" class="request-log"></ul>
+            </article>
+          </section>
+        </div>
+      </section>
+    </main>
+
+    <div id="modal-root"></div>
+    <script src="/admin-v2/app.js" defer></script>
+  </body>
+</html>
